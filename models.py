@@ -1,6 +1,6 @@
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
+from datetime import datetime, timezone
 
 db = SQLAlchemy()
 
@@ -12,7 +12,7 @@ class User(db.Model):
     email         = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(256), nullable=False)
     recurring_budget = db.Column(db.Float, nullable=True)
-    registration_date = db.Column(db.DateTime, default=datetime.utcnow)
+    registration_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     avatar        = db.Column(db.String(50), default='avatar_1')
     display_name  = db.Column(db.String(80))
 
@@ -38,7 +38,7 @@ class Expense(db.Model):
     amount         = db.Column(db.Float, nullable=False)
     description    = db.Column(db.String(255))
     payment_method = db.Column(db.String(50), default='Cash')
-    created_at     = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at     = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Composite index for the most common query pattern: filter by user then month prefix
     __table_args__ = (

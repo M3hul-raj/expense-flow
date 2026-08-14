@@ -156,8 +156,8 @@ Most expense trackers are basic CRUD apps with minimal styling. ExpenseFlow is b
 
 ```bash
 # Clone the repository
-git clone https://github.com/M3hul-raj/ExpenseFlow.git
-cd ExpenseFlow
+git clone https://github.com/M3hul-raj/expense-flow.git
+cd expense-flow
 
 # Create and activate virtual environment
 python -m venv venv
@@ -190,8 +190,8 @@ Open your browser and navigate to **http://127.0.0.1:5000/**
 1. Create a free account at [PythonAnywhere](https://www.pythonanywhere.com/)
 2. Open a **Bash Console** and clone the repo:
    ```bash
-   git clone https://github.com/M3hul-raj/ExpenseFlow.git
-   cd ExpenseFlow
+   git clone https://github.com/M3hul-raj/expense-flow.git
+   cd expense-flow
    ```
 3. Create a virtual environment:
    ```bash
@@ -199,12 +199,12 @@ Open your browser and navigate to **http://127.0.0.1:5000/**
    pip install -r requirements.txt
    ```
 4. Go to **Web** tab → **Add a new web app** → **Manual configuration** → Python 3.10
-5. Set **Source code** to `/home/YOUR_USERNAME/ExpenseFlow`
+5. Set **Source code** to `/home/YOUR_USERNAME/expense-flow`
 6. Set **Virtualenv** to `myvenv`
 7. Edit the **WSGI configuration file**:
    ```python
    import sys, os
-   path = '/home/YOUR_USERNAME/ExpenseFlow'
+   path = '/home/YOUR_USERNAME/expense-flow'
    if path not in sys.path:
        sys.path.append(path)
    os.chdir(path)
@@ -217,7 +217,7 @@ Open your browser and navigate to **http://127.0.0.1:5000/**
 ## Project Structure
 
 ```
-ExpenseFlow/
+expense-flow/
 ├── .github/workflows/
 │   └── ci.yml                  # GitHub Actions CI (pytest on push/PR)
 ├── app.py                      # Application factory (create_app)

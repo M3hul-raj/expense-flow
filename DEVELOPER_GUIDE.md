@@ -19,7 +19,7 @@ ExpenseFlow is a production-grade, full-stack web application built on a modern 
 ## 2. Complete File Directory Index
 
 ```text
-ExpenseFlow/
+expense-flow/
 ├── .github/workflows/
 │   └── ci.yml                  # GitHub Actions CI: pytest on every push/PR to main.
 ├── app.py                      # Application factory (create_app): config, extensions, blueprints.
@@ -32,7 +32,7 @@ ExpenseFlow/
 │   ├── __init__.py             # Package marker.
 │   ├── auth.py                 # Auth routes: login, register, logout, dashboard, edit_profile.
 │   ├── expenses.py             # Expense CRUD: add, view, edit, delete.
-│   ├── budget.py               # Budget management: set_budget, adjust_budget, quick_adjust.
+│   ├── budget.py               # Budget management: set_budget.
 │   ├── analytics.py            # Analytics dashboard (9 sections) and PDF export.
 │   └── main.py                 # PWA routes: /sw.js, /manifest.json, /offline.
 ├── tests/
@@ -66,15 +66,15 @@ ExpenseFlow/
 
 The application relies on three distinct relational tables mapped by SQLAlchemy, heavily optimized for read-heavy financial filtering.
 
-1.  **User (`id`, `username`, `email`, `password_hash`, `date_created`)**
+1.  **User (`id`, `username`, `email`, `password_hash`, `recurring_budget`, `registration_date`, `avatar`, `display_name`)**
     *   The parent table utilizing Werkzeug `pbkdf2:sha256` password hashing.
-2.  **Expense (`id`, `amount`, `category`, `description`, `date`, `payment_method`, `user_id`)**
+2.  **Expense (`id`, `user_id`, `date`, `category`, `amount`, `description`, `payment_method`, `created_at`)**
     *   Linked to `User` via foreign key `user_id`.
     *   **Optimization:** Utilizes a **composite index** on `(user_id, date)` ensuring that complex month-over-month queries execute in $O(\log n)$ time.
     *   Categories and payment methods are validated server-side against strict whitelists.
-3.  **Budget (`id`, `user_id`, `month`, `year`, `budget`, `is_recurring`)**
-    *   Linked to a `User`.
-    *   If `is_recurring` is True, the backend dynamically applies this budget to future months during runtime analytics generation.
+3.  **Budget (`id`, `user_id`, `year_month`, `amount`)**
+    *   Linked to `User` via foreign key `user_id` with a unique constraint on `(user_id, year_month)`.
+    *   If a specific month's budget is not set, the backend dynamically falls back to the user's `recurring_budget` or standard default.
 
 > [!WARNING]
 > **Cascade Deletes** are enforced at the ORM level. Deleting a User will automatically trigger the deletion of all their associated Expenses and Budgets to maintain referential integrity.
@@ -133,7 +133,7 @@ Tests run against an isolated **in-memory SQLite database** created via `create_
 ## 5. Deployment & Local Setup
 
 ### Local Development Setup
-1. Clone the repository: `git clone https://github.com/M3hul-raj/ExpenseFlow.git`
+1. Clone the repository: `git clone https://github.com/M3hul-raj/expense-flow.git`
 2. Create and activate a virtual environment: `python -m venv venv`
 3. Install dependencies: `pip install -r requirements.txt`
 4. Run the Flask development server: `python app.py`
