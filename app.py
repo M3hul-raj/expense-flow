@@ -17,17 +17,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger('expenseflow')
 
+DEV_FALLBACK_SECRET_KEY = 'dev-only-fallback-change-in-prod-!@#'
+TEST_FALLBACK_SECRET_KEY = 'test-only-secret-key'
+VALID_ENVS = {'production', 'development', 'testing'}
 
-def create_app(config_name='production'):
+
+def create_app(config_name=None):
     """
     Application factory.
 
-    config_name='production'  →  SQLite file DB, CSRF + rate-limit active.
+    config_name='production'  →  requires EXPENSEFLOW_SECRET_KEY, secure cookies, file/env DB.
+    config_name='development' →  allows dev fallback secret key and HTTP cookies.
     config_name='testing'     →  in-memory SQLite, CSRF + rate-limit disabled.
 
-    The module-level  app = create_app()  below preserves compatibility with
-    gunicorn and  python app.py  — nothing in deployment needs to change.
+    If config_name is omitted, EXPENSEFLOW_ENV (defaulting to 'production') is used.
     """
+    env = config_name if config_name is not None else os.environ.get('EXPENSEFLOW_ENV', 'production')
+    if env not in VALID_ENVS:
+        raise ValueError(f"Unknown ExpenseFlow environment: {env!r}")
+
+    if env == 'production':
+        secret_key = os.environ.get('EXPENSEFLOW_SECRET_KEY', '')
+        if not secret_key.strip() or secret_key in {DEV_FALLBACK_SECRET_KEY, TEST_FALLBACK_SECRET_KEY}:
+            raise RuntimeError(
+                'EXPENSEFLOW_SECRET_KEY environment variable must be set to a strong, '
+                'non-default value in production.'
+            )
+    elif env == 'development':
+        secret_key = os.environ.get('EXPENSEFLOW_SECRET_KEY') or DEV_FALLBACK_SECRET_KEY
+    else:
+        secret_key = os.environ.get('EXPENSEFLOW_SECRET_KEY') or TEST_FALLBACK_SECRET_KEY
+
     app = Flask(__name__)
 
     # ── Jinja filters ─────────────────────────────────────────────────────
@@ -41,13 +61,15 @@ def create_app(config_name='production'):
             return "₹0.00"
 
     # ── Config ────────────────────────────────────────────────────────────
-    # SECRET_KEY: read from environment in production; strong fallback for dev
-    app.secret_key = os.environ.get('EXPENSEFLOW_SECRET_KEY', 'dev-only-fallback-change-in-prod-!@#')
+    app.secret_key = secret_key
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     # WTF_CSRF_TIME_LIMIT: how long (seconds) a CSRF token stays valid; None = session lifetime
     app.config['WTF_CSRF_TIME_LIMIT'] = None
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    app.config['SESSION_COOKIE_SECURE'] = (env != 'development')
 
-    if config_name == 'testing':
+    if env == 'testing':
         app.config.update({
             'TESTING': True,
             'SQLALCHEMY_DATABASE_URI': 'sqlite:///:memory:',
@@ -56,7 +78,10 @@ def create_app(config_name='production'):
             'RATELIMIT_ENABLED': False,
         })
     else:
-        app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///expenses.db'
+        app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
+            'EXPENSEFLOW_DATABASE_URI',
+            'sqlite:///expenses.db',
+        )
 
     # ── Extensions ────────────────────────────────────────────────────────
     db.init_app(app)
@@ -95,10 +120,21 @@ def create_app(config_name='production'):
     return app
 
 
-# ── Module-level app ──────────────────────────────────────────────────────────
-# Preserved so that  gunicorn app:app  and  python app.py  continue to work
-# without any deployment changes.
-app = create_app()
+# ── Lazy module-level app ─────────────────────────────────────────────────────
+# Preserved so that  gunicorn app:app  and  from app import app as application
+# fail fast in production without breaking `from app import create_app` in tests.
+_app = None
+
+
+def __getattr__(name):
+    global _app
+    if name == 'app':
+        if _app is None:
+            _app = create_app()
+        return _app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    run_env = os.environ.get('EXPENSEFLOW_ENV', 'development')
+    create_app(run_env).run(debug=(run_env == 'development'), host='0.0.0.0', port=5000)
