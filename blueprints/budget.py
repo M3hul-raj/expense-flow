@@ -45,12 +45,12 @@ def set_budget():
         year_raw = request.form.get('year', '').strip()
         budget_raw = request.form.get('budget', '').strip()
 
-        if not re.fullmatch(r'\d{1,2}', month_raw) or not (1 <= int(month_raw) <= 12):
+        if not re.fullmatch(r'[0-9]{1,2}', month_raw) or not (1 <= int(month_raw) <= 12):
             flash('Please select a valid month (01–12).', 'error')
             return redirect(url_for('budget.set_budget'))
         month = f"{int(month_raw):02d}"
 
-        if not re.fullmatch(r'\d{4}', year_raw) or not (2000 <= int(year_raw) <= 2100):
+        if not re.fullmatch(r'[0-9]{4}', year_raw) or not (2000 <= int(year_raw) <= 2100):
             flash('Please select a valid year (2000–2100).', 'error')
             return redirect(url_for('budget.set_budget'))
         year = year_raw

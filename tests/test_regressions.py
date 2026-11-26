@@ -309,7 +309,7 @@ class TestSetBudgetValidation:
         assert resp.status_code == 200
         assert Budget.query.filter_by(user_id=user.id).count() == 0
 
-    @pytest.mark.parametrize('bad_month', ['', '0', '00', '13', 'abc'])
+    @pytest.mark.parametrize('bad_month', ['', '0', '00', '13', 'abc', '٠٥', '０５'])
     def test_invalid_month_rejected(self, auth_client, user, bad_month):
         from models import Budget
 
@@ -322,7 +322,7 @@ class TestSetBudgetValidation:
         assert b'valid month' in resp.data
         assert Budget.query.filter_by(user_id=user.id).count() == 0
 
-    @pytest.mark.parametrize('bad_year', ['', '1999', '2101', '99999', 'abcd'])
+    @pytest.mark.parametrize('bad_year', ['', '1999', '2101', '99999', 'abcd', '٢٠٢٦', '２０２６'])
     def test_invalid_year_rejected(self, auth_client, user, bad_year):
         from models import Budget
 
