@@ -22,7 +22,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(256), nullable=False)
     recurring_budget = db.Column(db.Float, nullable=True)
     registration_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
-    avatar        = db.Column(db.String(50), default='avatar_1')
+    avatar        = db.Column(db.String(50), default='avatar_1', server_default=db.text("'avatar_1'"))
     display_name  = db.Column(db.String(80))
 
     expenses = db.relationship('Expense', backref='user', lazy=True, cascade="all, delete-orphan")
