@@ -682,3 +682,66 @@ class TestLoggingPrivacy:
         assert unknown_ident not in caplog.text
         assert user.email not in caplog.text
         assert user.username not in caplog.text
+
+
+class TestDatabaseConfig:
+    """Tests for PostgreSQL URI normalization, engine options, and test DB override."""
+
+    @pytest.mark.parametrize(
+        'raw_uri,expected_uri',
+        [
+            ('postgres://u:p@localhost:5432/expenseflow', 'postgresql+psycopg://u:p@localhost:5432/expenseflow'),
+            ('postgresql://u:p@localhost:5432/expenseflow', 'postgresql+psycopg://u:p@localhost:5432/expenseflow'),
+            ('  postgresql://u:p@db:5432/app  ', 'postgresql+psycopg://u:p@db:5432/app'),
+            ('postgresql+psycopg://u:p@localhost:5432/app', 'postgresql+psycopg://u:p@localhost:5432/app'),
+            ('sqlite:///expenses.db', 'sqlite:///expenses.db'),
+        ],
+    )
+    def test_normalize_database_uri_rewrites_postgres_schemes(self, raw_uri, expected_uri):
+        """Legacy postgres:// and bare postgresql:// URIs must normalize to postgresql+psycopg://."""
+        from app import normalize_database_uri
+
+        assert normalize_database_uri(raw_uri) == expected_uri
+
+    def test_postgres_uri_sets_pool_pre_ping_and_normalizes_scheme(self, monkeypatch):
+        """Production PostgreSQL config must normalize URI and enable pool_pre_ping even without psycopg installed."""
+        monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', 'prod-secret-key-with-at-least-32-chars!!')
+        monkeypatch.setenv('EXPENSEFLOW_DATABASE_URI', 'postgres://user:pass@db.internal:5432/expenseflow')
+        monkeypatch.setattr(db, 'init_app', lambda _app: None)
+        monkeypatch.setattr(db, 'create_all', lambda: None)
+
+        pg_app = create_app('production')
+        assert pg_app.config['SQLALCHEMY_DATABASE_URI'] == 'postgresql+psycopg://user:pass@db.internal:5432/expenseflow'
+        assert pg_app.config.get('SQLALCHEMY_ENGINE_OPTIONS', {}).get('pool_pre_ping') is True
+
+    def test_postgres_uri_loads_psycopg_dialect_when_installed(self, monkeypatch):
+        """When optional psycopg is installed, create_app builds a psycopg-backed SQLAlchemy engine."""
+        pytest.importorskip('psycopg')
+        monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', 'prod-secret-key-with-at-least-32-chars!!')
+        monkeypatch.setenv('EXPENSEFLOW_DATABASE_URI', 'postgres://user:pass@db.internal:5432/expenseflow')
+        monkeypatch.setattr(db, 'create_all', lambda: None)
+
+        pg_app = create_app('production')
+        try:
+            with pg_app.app_context():
+                assert db.engine.dialect.driver == 'psycopg'
+        finally:
+            with pg_app.app_context():
+                db.engine.dispose()
+
+    def test_testing_mode_accepts_explicit_database_uri_and_ignores_prod_env(self, monkeypatch, tmp_path):
+        """Testing mode keeps ignoring EXPENSEFLOW_DATABASE_URI while allowing explicit test DB override."""
+        monkeypatch.setenv('EXPENSEFLOW_DATABASE_URI', 'postgres://should:not@be-used:5432/prod')
+
+        default_test_app = create_app('testing')
+        assert default_test_app.config['SQLALCHEMY_DATABASE_URI'] == 'sqlite:///:memory:'
+
+        override_file = tmp_path / 'override_test.db'
+        override_uri = f"sqlite:///{override_file.as_posix()}"
+        override_app = create_app('testing', database_uri=override_uri)
+        try:
+            assert override_app.config['SQLALCHEMY_DATABASE_URI'] == override_uri
+            assert override_file.exists()
+        finally:
+            with override_app.app_context():
+                db.engine.dispose()

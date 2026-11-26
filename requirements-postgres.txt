@@ -1,0 +1,2 @@
+# Optional PostgreSQL DBAPI driver (kept separate from requirements.txt for PythonAnywhere)
+psycopg[binary]==3.3.9
