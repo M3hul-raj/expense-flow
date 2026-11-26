@@ -35,10 +35,14 @@ expense-flow/
 │   ├── budget.py               # Budget management: set_budget.
 │   ├── analytics.py            # Analytics dashboard (9 sections) and PDF export.
 │   └── main.py                 # PWA routes: /sw.js, /manifest.json, /offline.
+├── deploy/
+│   └── pa_deploy.sh            # PythonAnywhere safe deploy script (backup, pull, test).
+├── scripts/
+│   └── smoke_test.py           # Stdlib end-to-end smoke test (CSRF, cookies, CRUD, PDF).
 ├── tests/
 │   ├── conftest.py             # Shared pytest fixtures (isolated in-memory SQLite per test).
 │   ├── test_app.py             # 26 functional tests: CRUD, budget logic, validation, CSRF.
-│   └── test_regressions.py     # 61 regression tests: config, security, validation, escaping.
+│   └── test_regressions.py     # 66 regression tests: config, security, validation, escaping, SW.
 ├── static/
 │   ├── main.css                # The core CSS Design System (CSS Variables, Dark/Light modes).
 │   ├── avatars.css             # Avatar styling for profile selection.
@@ -101,9 +105,9 @@ The `/export/pdf` route utilizes the **ReportLab (`Platypus` engine)** to genera
 *   It features custom table styling, pagination, and dynamic headers based on the current user's session data.
 
 ### D. Progressive Web App (PWA) Offline Resilience
-The application utilizes a custom Service Worker (`sw.js`, cache `expenseflow-v3`) to intercept network requests:
-*   **Cache-First Strategy:** Static assets (CSS, icons, CDN JS/fonts) and `/offline` are served from the local cache.
-*   **Network-Only Strategy for HTML:** HTML page navigations always hit the server directly and are never stored in Cache Storage (preventing cached private pages after logout), falling back to the pre-cached `/offline` page when offline.
+The application utilizes a custom Service Worker (`sw.js`, cache `expenseflow-v4`) to intercept network requests:
+*   **Cache-First Strategy:** Static assets (CSS, icons, `/manifest.json`, CDN JS/fonts) and `/offline` are served from the local cache (with a valid `503` `Response` fallback if an uncached static fetch fails offline).
+*   **Network-Only Strategy for HTML & Dynamic Routes:** HTML navigations always hit the server directly and are never stored in Cache Storage (preventing cached private pages after logout), falling back to the pre-cached `/offline` page when offline, while non-navigation dynamic requests fall back to a valid `503` `Response` so no `FetchEvent` rejects unhandled.
 
 ### E. High-Fidelity Glassmorphism & Animations
 The landing page implements high-end visual design techniques seen in top-tier SaaS platforms.
@@ -121,11 +125,11 @@ All POST forms include a hidden `csrf_token()` field validated by **Flask-WTF's 
 *   **Testing:** CSRF is disabled in the test configuration (`WTF_CSRF_ENABLED=False`) so functional tests can POST without tokens. Two dedicated tests re-enable CSRF to verify rejection without a valid token.
 
 ### H. Automated Testing & CI
-The `tests/` directory contains **87 pytest tests** across `test_app.py` and `test_regressions.py` covering:
+The `tests/` directory contains **92 pytest tests** across `test_app.py` and `test_regressions.py` covering:
 *   **Expense CRUD** — add, edit, delete with server-side validation (negative amounts, future dates, invalid categories)
 *   **Cross-user isolation** — one user cannot edit/delete another user's expenses (returns 404)
 *   **Budget logic** — default budget, explicit budget row, recurring fallback, override priority, and strict ASCII input validation
-*   **Security & regressions** — fail-fast production `EXPENSEFLOW_SECRET_KEY` (32+ chars), secure cookie flags, generic login errors, `/edit_profile` password gate for email changes, ReportLab XML escaping, and dashboard recent-transactions ordering
+*   **Security & regressions** — fail-fast production `EXPENSEFLOW_SECRET_KEY` (32+ chars), HTTPS `Set-Cookie` flags (`HttpOnly`, `Secure`, `SameSite=Lax`), generic login errors, PII-free auth logs, `/edit_profile` password gate for email changes, ReportLab XML escaping, dashboard recent-transactions ordering, and `sw.js` fetch resilience
 *   **CSRF enforcement** — POST without token returns 400
 
 Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:`) created via `create_app('testing')` — the production `expenses.db` is never touched. **GitHub Actions CI** (`.github/workflows/ci.yml`) runs `pytest tests/ -v` across Python 3.10, 3.11, 3.12, and 3.13 on every push and pull request to `main`.
@@ -152,12 +156,40 @@ Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:
 3. Install dependencies: `pip install -r requirements.txt`
 4. Run the Flask development server: `python app.py` (defaults to `development` mode on `http://127.0.0.1:5000/`)
 
-### Production Deployment (WSGI)
-When deploying to a live server (e.g., PythonAnywhere), set `EXPENSEFLOW_ENV=production` and `EXPENSEFLOW_SECRET_KEY` (32+ chars) in the WSGI configuration file before `from app import app as application`, then reload the WSGI daemon after fetching updates:
-```bash
-git pull origin main
-touch /var/www/your_username_pythonanywhere_com_wsgi.py
-```
+### Production Deployment (PythonAnywhere)
+
+#### One-Time Setup
+1. Open the **Web** tab on PythonAnywhere and enable **Force HTTPS** (required because production sets `SESSION_COOKIE_SECURE = True`).
+2. Generate a random production key in the PythonAnywhere Bash console (do **not** commit or share the output):
+   ```bash
+   python3 -c "import secrets; print(secrets.token_hex(32))"
+   ```
+3. Open your **WSGI configuration file** from the **Web** tab and set `EXPENSEFLOW_ENV` and `EXPENSEFLOW_SECRET_KEY` **before** importing `app`:
+   ```python
+   import sys, os
+   path = '/home/YOUR_USERNAME/ExpenseFlow'
+   if path not in sys.path:
+       sys.path.append(path)
+   os.chdir(path)
+   os.environ['EXPENSEFLOW_ENV'] = 'production'
+   os.environ['EXPENSEFLOW_SECRET_KEY'] = '<paste-generated-32+-char-secret-here>'
+   from app import app as application
+   ```
+
+#### Repeatable Deploy & Smoke Test Flow
+1. **Run the deploy script** in the PythonAnywhere Bash console (optionally preview first with `--dry-run`):
+   ```bash
+   cd ~/ExpenseFlow
+   bash deploy/pa_deploy.sh --dry-run
+   bash deploy/pa_deploy.sh
+   ```
+   The script enforces branch `main`, backs up `instance/expenses.db` into `~/backups/` via `sqlite3 .backup`, verifies `PRAGMA integrity_check` and row counts, runs `git pull --ff-only origin main`, installs requirements, runs `pytest`, and prints the rollback command (`git reset --hard <old_hash>`). It never touches the WSGI file.
+2. **Reload**: Click **Reload** on the PythonAnywhere **Web** tab.
+3. **Run the end-to-end smoke test** against the live HTTPS URL using a dedicated test/throwaway account via environment variables:
+   ```bash
+   SMOKE_USER='<test-username>' SMOKE_PASS='<test-password>' \
+     python scripts/smoke_test.py https://your_username.pythonanywhere.com
+   ```
 
 ---
 
@@ -166,11 +198,11 @@ touch /var/www/your_username_pythonanywhere_com_wsgi.py
 For technical recruiters reviewing this repository, here is a summary of the engineering skills demonstrated in this codebase:
 
 *   **Full Stack Architecture:** Engineered a modular MVC backend with Flask's application factory pattern and 5 Blueprints, using SQLAlchemy ORM with composite database indexing for high-performance query times.
-*   **Security Hardening:** Implemented CSRF token validation on all POST forms via Flask-WTF, and brute-force login protection via Flask-Limiter (5 req / 15 min rate limit with custom 429 response rendering).
+*   **Security Hardening:** Implemented CSRF token validation on all POST forms via Flask-WTF, brute-force login protection via Flask-Limiter (5 req / 15 min rate limit with custom 429 response rendering), fail-fast `EXPENSEFLOW_SECRET_KEY` checks, `HttpOnly`/`Secure`/`SameSite=Lax` cookies, and PII-free auth logging.
 *   **Advanced Data Processing:** Developed complex data aggregation algorithms to feed a real-time 9-section analytics engine, calculating dynamic budget thresholds, MoM variances, and heatmap intensities.
-*   **Testing & CI/CD:** Built a 26-test pytest suite with isolated in-memory database fixtures, integrated into a GitHub Actions CI pipeline running on every push and PR.
+*   **Testing & CI/CD:** Built a 92-test pytest suite with isolated in-memory database fixtures and a stdlib end-to-end smoke test, integrated into a GitHub Actions CI pipeline across Python 3.10–3.13.
 *   **UI/UX Engineering:** Designed a premium, glassmorphic UI with a scalable CSS variable architecture, implementing flawless, OS-aware Dark and Light modes.
-*   **Web APIs & PWA:** Programmed a custom Service Worker with distinct "network-first" and "cache-first" caching strategies for offline resilience and mobile installation.
+*   **Web APIs & PWA:** Programmed a custom Service Worker with network-only HTML navigations (zero private page caching) and cache-first static asset caching for offline resilience and mobile installation.
 *   **Document Generation:** Built a custom pipeline using ReportLab to dynamically render and serve formatted, paginated PDF financial reports from memory.
 
 ---
