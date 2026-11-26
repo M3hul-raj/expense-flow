@@ -137,10 +137,6 @@ def create_app(config_name=None, database_uri=None):
         db.session.rollback()  # safety: clear any broken transaction
         return render_template('500.html'), 500
 
-    # ── Database ──────────────────────────────────────────────────────────
-    with app.app_context():
-        db.create_all()
-
     return app
 
 
