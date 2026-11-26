@@ -19,6 +19,7 @@ logger = logging.getLogger('expenseflow')
 
 DEV_FALLBACK_SECRET_KEY = 'dev-only-fallback-change-in-prod-!@#'
 TEST_FALLBACK_SECRET_KEY = 'test-only-secret-key'
+MIN_SECRET_KEY_LENGTH = 32
 VALID_ENVS = {'production', 'development', 'testing'}
 
 
@@ -38,10 +39,13 @@ def create_app(config_name=None):
 
     if env == 'production':
         secret_key = os.environ.get('EXPENSEFLOW_SECRET_KEY', '')
-        if not secret_key.strip() or secret_key in {DEV_FALLBACK_SECRET_KEY, TEST_FALLBACK_SECRET_KEY}:
+        if (
+            len(secret_key.strip()) < MIN_SECRET_KEY_LENGTH
+            or secret_key in {DEV_FALLBACK_SECRET_KEY, TEST_FALLBACK_SECRET_KEY}
+        ):
             raise RuntimeError(
-                'EXPENSEFLOW_SECRET_KEY environment variable must be set to a strong, '
-                'non-default value in production.'
+                f'EXPENSEFLOW_SECRET_KEY environment variable must be at least '
+                f'{MIN_SECRET_KEY_LENGTH} characters and non-default in production.'
             )
     elif env == 'development':
         secret_key = os.environ.get('EXPENSEFLOW_SECRET_KEY') or DEV_FALLBACK_SECRET_KEY

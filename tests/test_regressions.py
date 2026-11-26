@@ -30,13 +30,15 @@ class TestSecretKeyAndSessionConfig:
         [
             '',
             '   ',
+            'too-short-secret',
+            'x' * 31,
             'dev-only-fallback-change-in-prod-!@#',
         ],
     )
-    def test_production_rejects_blank_or_fallback_secret_key(
+    def test_production_rejects_blank_short_or_fallback_secret_key(
         self, monkeypatch, tmp_path, bad_key
     ):
-        """create_app('production') must reject blank or insecure fallback keys."""
+        """create_app('production') must reject blank, <32-char, or fallback keys."""
         monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', bad_key)
         monkeypatch.setenv(
             'EXPENSEFLOW_DATABASE_URI',
@@ -50,12 +52,14 @@ class TestSecretKeyAndSessionConfig:
         """Production must set strict session cookie flags and use configured DB URI."""
         db_file = tmp_path / 'prod_cookies.db'
         expected_uri = f"sqlite:///{db_file.as_posix()}"
-        monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', 'a-strong-random-production-secret-key')
+        strong_key = 'prod-secret-key-with-at-least-32-chars!!'
+        assert len(strong_key) >= 32
+        monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', strong_key)
         monkeypatch.setenv('EXPENSEFLOW_DATABASE_URI', expected_uri)
 
         prod_app = create_app('production')
         try:
-            assert prod_app.secret_key == 'a-strong-random-production-secret-key'
+            assert prod_app.secret_key == strong_key
             assert prod_app.config['SESSION_COOKIE_SECURE'] is True
             assert prod_app.config['SESSION_COOKIE_HTTPONLY'] is True
             assert prod_app.config['SESSION_COOKIE_SAMESITE'] == 'Lax'
