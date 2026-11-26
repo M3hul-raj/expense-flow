@@ -9,6 +9,7 @@ import calendar as cal_module
 import io
 import logging
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from xml.sax.saxutils import escape
 from dateutil.relativedelta import relativedelta
 from flask import (
@@ -19,6 +20,7 @@ from models import db, User, Expense
 from utils import (
     is_logged_in, get_current_year_month, get_user_budget,
     get_budget_history, month_date_range,
+    paise_to_chart_float, format_paise_as_rupees,
 )
 
 logger = logging.getLogger('expenseflow')
@@ -65,7 +67,7 @@ def analytics():
         Expense.user_id == user_id,
         Expense.date >= sel_start,
         Expense.date < sel_end,
-    ).order_by(Expense.amount.desc()).all()
+    ).order_by(Expense.amount_paise.desc()).all()
 
     prev_expenses = Expense.query.filter(
         Expense.user_id == user_id,
@@ -88,8 +90,8 @@ def analytics():
         })
 
     # ── Basic totals ───────────────────────────────────────────────────────
-    total_this_month = sum(e.amount for e in month_expenses)
-    total_prev_month = sum(e.amount for e in prev_expenses)
+    total_this_month = sum(e.amount_paise for e in month_expenses)
+    total_prev_month = sum(e.amount_paise for e in prev_expenses)
 
     if total_prev_month > 0:
         mom_change_pct = ((total_this_month - total_prev_month) / total_prev_month) * 100
@@ -108,20 +110,20 @@ def analytics():
     daily_totals = {}
     for e in month_expenses:
         day = e.date.day
-        daily_totals[day] = daily_totals.get(day, 0) + e.amount
+        daily_totals[day] = daily_totals.get(day, 0) + e.amount_paise
 
     daily_labels = list(range(1, days_in_month + 1))
-    daily_amounts = [round(daily_totals.get(d, 0), 2) for d in daily_labels]
+    daily_amounts = [paise_to_chart_float(daily_totals.get(d, 0)) for d in daily_labels]
     peak_day = max(daily_totals, key=daily_totals.get) if daily_totals else None
     peak_day_amount = daily_totals.get(peak_day, 0) if peak_day else 0
 
     # ── Category breakdown ─────────────────────────────────────────────────
     cat_totals = {}
     for e in month_expenses:
-        cat_totals[e.category] = cat_totals.get(e.category, 0) + e.amount
+        cat_totals[e.category] = cat_totals.get(e.category, 0) + e.amount_paise
     cat_totals_sorted = sorted(cat_totals.items(), key=lambda x: x[1], reverse=True)
     cat_labels = [c[0] for c in cat_totals_sorted]
-    cat_amounts = [round(c[1], 2) for c in cat_totals_sorted]
+    cat_amounts = [paise_to_chart_float(c[1]) for c in cat_totals_sorted]
     cat_percentages = [
         round((c[1] / total_this_month * 100), 1) if total_this_month > 0 else 0
         for c in cat_totals_sorted
@@ -130,7 +132,7 @@ def analytics():
     # ── Category MoM change (for trend banner) ─────────────────────────────
     prev_cat_totals = {}
     for e in prev_expenses:
-        prev_cat_totals[e.category] = prev_cat_totals.get(e.category, 0) + e.amount
+        prev_cat_totals[e.category] = prev_cat_totals.get(e.category, 0) + e.amount_paise
 
     cat_mom = {}
     for cat, amt in cat_totals.items():
@@ -143,10 +145,10 @@ def analytics():
     pay_totals = {}
     for e in month_expenses:
         method = e.payment_method or 'Other'
-        pay_totals[method] = pay_totals.get(method, 0) + e.amount
+        pay_totals[method] = pay_totals.get(method, 0) + e.amount_paise
     pay_totals_sorted = sorted(pay_totals.items(), key=lambda x: x[1], reverse=True)
     pay_labels = [p[0] for p in pay_totals_sorted]
-    pay_amounts = [round(p[1], 2) for p in pay_totals_sorted]
+    pay_amounts = [paise_to_chart_float(p[1]) for p in pay_totals_sorted]
 
     # ── Top 5 expenses ─────────────────────────────────────────────────────
     top_5 = month_expenses[:5]
@@ -154,20 +156,21 @@ def analytics():
     # ── Budget history for grouped bar (6 months) ──────────────────────────
     budget_history = get_budget_history(user_id, 6)
     bh_labels   = [item['month'] for item in reversed(budget_history)]
-    bh_budgets  = [item['budget'] for item in reversed(budget_history)]
-    bh_spending = [item['spending'] for item in reversed(budget_history)]
+    bh_budgets  = [paise_to_chart_float(item['budget']) for item in reversed(budget_history)]
+    bh_spending = [paise_to_chart_float(item['spending']) for item in reversed(budget_history)]
 
     # ── Calendar heatmap data ──────────────────────────────────────────────
-    max_day_spend = max(daily_amounts) if daily_amounts else 1
+    max_day_spend_paise = max(daily_totals.values()) if daily_totals else 1
     calendar_weeks = []
     first_weekday = cal_module.monthrange(sel_dt.year, sel_dt.month)[0]  # 0=Mon
     day_counter = 1
     week = [None] * first_weekday
     while day_counter <= days_in_month:
+        day_paise = daily_totals.get(day_counter, 0)
         week.append({
             'day': day_counter,
-            'amount': daily_totals.get(day_counter, 0),
-            'intensity': round(daily_totals.get(day_counter, 0) / max_day_spend, 2) if max_day_spend > 0 else 0
+            'amount': day_paise,
+            'intensity': round(day_paise / max_day_spend_paise, 2) if max_day_spend_paise > 0 else 0
         })
         if len(week) == 7:
             calendar_weeks.append(week)
@@ -179,7 +182,11 @@ def analytics():
         calendar_weeks.append(week)
 
     # ── Avg daily spend ────────────────────────────────────────────────────
-    avg_daily = total_this_month / days_in_month if days_in_month > 0 else 0
+    avg_daily = (
+        int((Decimal(total_this_month) / Decimal(days_in_month)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+        if days_in_month > 0
+        else 0
+    )
 
     return render_template('analytics.html',
         username=user.username,
@@ -275,13 +282,13 @@ def export_pdf():
 
     all_expenses = Expense.query.filter_by(user_id=user_id).order_by(Expense.date.desc()).all()
 
-    total_spent = sum(e.amount for e in month_expenses)
+    total_spent = sum(e.amount_paise for e in month_expenses)
     budget = get_user_budget(user_id, selected_month)
     remaining = budget - total_spent
 
     cat_totals = {}
     for e in month_expenses:
-        cat_totals[e.category] = cat_totals.get(e.category, 0) + e.amount
+        cat_totals[e.category] = cat_totals.get(e.category, 0) + e.amount_paise
     cat_sorted = sorted(cat_totals.items(), key=lambda x: x[1], reverse=True)
 
     # ── Colours ──────────────────────────────────────────────────────────
@@ -390,9 +397,9 @@ def export_pdf():
          Paragraph("MONTHLY BUDGET", small_style),
          Paragraph("REMAINING", small_style),
          Paragraph("TRANSACTIONS", small_style)],
-        [Paragraph(f"₹{total_spent:,.2f}", ParagraphStyle('sv1', fontName='Helvetica-Bold', fontSize=14, textColor=INDIGO, alignment=TA_CENTER)),
-         Paragraph(f"₹{budget:,.2f}",      ParagraphStyle('sv2', fontName='Helvetica-Bold', fontSize=14, textColor=BLACK, alignment=TA_CENTER)),
-         Paragraph(f"₹{abs(remaining):,.2f}", ParagraphStyle('sv3', fontName='Helvetica-Bold', fontSize=14, textColor=rem_color, alignment=TA_CENTER)),
+        [Paragraph(format_paise_as_rupees(total_spent), ParagraphStyle('sv1', fontName='Helvetica-Bold', fontSize=14, textColor=INDIGO, alignment=TA_CENTER)),
+         Paragraph(format_paise_as_rupees(budget),      ParagraphStyle('sv2', fontName='Helvetica-Bold', fontSize=14, textColor=BLACK, alignment=TA_CENTER)),
+         Paragraph(format_paise_as_rupees(abs(remaining)), ParagraphStyle('sv3', fontName='Helvetica-Bold', fontSize=14, textColor=rem_color, alignment=TA_CENTER)),
          Paragraph(str(len(month_expenses)), ParagraphStyle('sv4', fontName='Helvetica-Bold', fontSize=14, textColor=SLATE, alignment=TA_CENTER))],
     ]
     stats_table = Table(stats_data, colWidths=[col_w/4]*4)
@@ -421,7 +428,7 @@ def export_pdf():
             bg = ROW_ALT if i % 2 == 0 else WHITE
             cat_rows.append([
                 Paragraph(escape(cat),            cell_style),
-                Paragraph(f"₹{amt:,.2f}",         cell_bold),
+                Paragraph(format_paise_as_rupees(amt), cell_bold),
                 Paragraph(f"{pct:.1f}%",           cell_style),
             ])
 
@@ -464,7 +471,7 @@ def export_pdf():
             Paragraph(escape(e.category),               cell_style),
             Paragraph(desc,                             cell_style),
             Paragraph(escape(e.payment_method or '—'),  cell_style),
-            Paragraph(f"₹{e.amount:,.2f}",              cell_right),
+            Paragraph(format_paise_as_rupees(e.amount_paise), cell_right),
         ])
 
     # Total row
@@ -473,7 +480,7 @@ def export_pdf():
         Paragraph("", cell_style),
         Paragraph("", cell_style),
         Paragraph("TOTAL", cell_bold),
-        Paragraph(f"₹{sum(e.amount for e in target):,.2f}",
+        Paragraph(format_paise_as_rupees(sum(e.amount_paise for e in target)),
                   ParagraphStyle('tot', fontName='Helvetica-Bold', fontSize=8,
                                  textColor=INDIGO, alignment=TA_RIGHT)),
     ])

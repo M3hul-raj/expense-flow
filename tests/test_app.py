@@ -31,7 +31,7 @@ def _make_expense(user_id: int, **overrides) -> Expense:
     defaults = dict(
         date=py_date(2026, 7, 9),
         category='Food',
-        amount=100.0,
+        amount_paise=10000,
         description='Test expense',
         payment_method='Cash',
     )
@@ -95,10 +95,20 @@ class TestAddExpenseValidation:
         db.session.expire_all()
         expense = Expense.query.filter_by(user_id=user.id).first()
         assert expense is not None
-        assert expense.amount == 99.99
+        assert expense.amount_paise == 9999
         assert expense.category == 'Food'
         assert expense.description == 'Lunch'
         assert expense.payment_method == 'UPI'
+
+    def test_decimal_half_up_rounds_input_to_exact_paise(self, auth_client, user):
+        auth_client.post('/add', data={
+            'date': '2026-07-09', 'category': 'Food',
+            'amount': '10.125', 'description': 'Half up', 'payment_method': 'UPI',
+        }, follow_redirects=True)
+        db.session.expire_all()
+        expense = Expense.query.filter_by(user_id=user.id).first()
+        assert expense is not None
+        assert expense.amount_paise == 1013
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -108,8 +118,8 @@ class TestAddExpenseValidation:
 class TestEditExpense:
 
     def test_updates_only_targeted_row(self, auth_client, user):
-        e1 = _make_expense(user.id, category='Food', amount=100.0)
-        e2 = _make_expense(user.id, category='Transport', amount=50.0)
+        e1 = _make_expense(user.id, category='Food', amount_paise=10000)
+        e2 = _make_expense(user.id, category='Transport', amount_paise=5000)
 
         auth_client.post(f'/edit/{e1.id}', data={
             'date': '2026-07-09', 'category': 'Health',
@@ -121,10 +131,10 @@ class TestEditExpense:
         untouched = db.session.get(Expense, e2.id)
 
         assert updated.category == 'Health'
-        assert updated.amount   == 75.0
+        assert updated.amount_paise == 7500
         # e2 must be completely untouched
         assert untouched.category == 'Transport'
-        assert untouched.amount   == 50.0
+        assert untouched.amount_paise == 5000
 
     def test_wrong_user_returns_404(self, client, user, user2):
         """bob must not be able to edit alice's expense."""
@@ -147,7 +157,7 @@ class TestEditExpense:
 
     def test_validation_rejects_invalid_data_on_edit(self, auth_client, user):
         """Editing with a bad category should flash an error, not save."""
-        e = _make_expense(user.id, category='Food', amount=100.0)
+        e = _make_expense(user.id, category='Food', amount_paise=10000)
 
         auth_client.post(f'/edit/{e.id}', data={
             'date': '2026-07-09', 'category': 'INVALID_CAT',
@@ -173,8 +183,8 @@ class TestDeleteExpense:
         assert db.session.get(Expense, e.id) is not None
 
     def test_post_removes_only_targeted_row(self, auth_client, user):
-        e1 = _make_expense(user.id, amount=100.0)
-        e2 = _make_expense(user.id, amount=200.0)
+        e1 = _make_expense(user.id, amount_paise=10000)
+        e2 = _make_expense(user.id, amount_paise=20000)
 
         auth_client.post(f'/delete/{e1.id}', follow_redirects=True)
 
@@ -207,31 +217,31 @@ class TestDeleteExpense:
 class TestBudgetFunctions:
 
     def test_get_user_budget_default(self, app, user):
-        """No Budget row, no recurring_budget → default 2000."""
-        assert get_user_budget(user.id, '2026-01') == 2000.0
+        """No Budget row, no recurring_budget_paise → default 200000 paise (₹2000.00)."""
+        assert get_user_budget(user.id, '2026-01') == 200_000
 
     def test_get_user_budget_explicit_row(self, app, user):
-        b = Budget(user_id=user.id, year_month='2026-07', amount=5000.0)
+        b = Budget(user_id=user.id, year_month='2026-07', amount_paise=500_000)
         db.session.add(b)
         db.session.commit()
-        assert get_user_budget(user.id, '2026-07') == 5000.0
+        assert get_user_budget(user.id, '2026-07') == 500_000
 
     def test_get_user_budget_recurring_fallback(self, app, user):
-        """No explicit Budget for the month → fall back to user.recurring_budget."""
+        """No explicit Budget for the month → fall back to user.recurring_budget_paise."""
         u = db.session.get(User, user.id)
-        u.recurring_budget = 3500.0
+        u.recurring_budget_paise = 350_000
         db.session.commit()
-        assert get_user_budget(user.id, '2099-12') == 3500.0
+        assert get_user_budget(user.id, '2099-12') == 350_000
 
     def test_get_user_budget_explicit_overrides_recurring(self, app, user):
-        """Explicit Budget row wins over recurring_budget."""
+        """Explicit Budget row wins over recurring_budget_paise."""
         u = db.session.get(User, user.id)
-        u.recurring_budget = 3500.0
+        u.recurring_budget_paise = 350_000
         db.session.commit()
-        b = Budget(user_id=user.id, year_month='2026-07', amount=8000.0)
+        b = Budget(user_id=user.id, year_month='2026-07', amount_paise=800_000)
         db.session.add(b)
         db.session.commit()
-        assert get_user_budget(user.id, '2026-07') == 8000.0
+        assert get_user_budget(user.id, '2026-07') == 800_000
 
     def test_get_budget_history_returns_n_months(self, app, user):
         history = get_budget_history(user.id, months=6)
@@ -243,7 +253,7 @@ class TestBudgetFunctions:
 
     def test_get_budget_history_status_on_track(self, app, user):
         ym = get_current_year_month()
-        db.session.add(Budget(user_id=user.id, year_month=ym, amount=5000.0))
+        db.session.add(Budget(user_id=user.id, year_month=ym, amount_paise=500_000))
         db.session.commit()
         history = get_budget_history(user.id, months=1)
         assert history[0]['status'] == 'On Track'
@@ -251,9 +261,9 @@ class TestBudgetFunctions:
     def test_get_budget_history_status_near_limit(self, app, user):
         ym = get_current_year_month()
         first_day = py_date.fromisoformat(ym + '-01')
-        db.session.add(Budget(user_id=user.id, year_month=ym, amount=1000.0))
+        db.session.add(Budget(user_id=user.id, year_month=ym, amount_paise=100_000))
         db.session.add(Expense(user_id=user.id, date=first_day, category='Food',
-                               amount=950.0, description='x', payment_method='Cash'))
+                               amount_paise=95_000, description='x', payment_method='Cash'))
         db.session.commit()
         history = get_budget_history(user.id, months=1)
         assert history[0]['status'] == 'Near Limit'
@@ -261,9 +271,9 @@ class TestBudgetFunctions:
     def test_get_budget_history_status_over_budget(self, app, user):
         ym = get_current_year_month()
         first_day = py_date.fromisoformat(ym + '-01')
-        db.session.add(Budget(user_id=user.id, year_month=ym, amount=10.0))
+        db.session.add(Budget(user_id=user.id, year_month=ym, amount_paise=1_000))
         db.session.add(Expense(user_id=user.id, date=first_day, category='Food',
-                               amount=500.0, description='x', payment_method='Cash'))
+                               amount_paise=50_000, description='x', payment_method='Cash'))
         db.session.commit()
         history = get_budget_history(user.id, months=1)
         assert history[0]['status'] == 'Over Budget'
@@ -271,12 +281,12 @@ class TestBudgetFunctions:
     def test_get_budget_history_remaining_calculation(self, app, user):
         ym = get_current_year_month()
         first_day = py_date.fromisoformat(ym + '-01')
-        db.session.add(Budget(user_id=user.id, year_month=ym, amount=1000.0))
+        db.session.add(Budget(user_id=user.id, year_month=ym, amount_paise=100_000))
         db.session.add(Expense(user_id=user.id, date=first_day, category='Food',
-                               amount=300.0, description='x', payment_method='Cash'))
+                               amount_paise=30_000, description='x', payment_method='Cash'))
         db.session.commit()
         history = get_budget_history(user.id, months=1)
-        assert history[0]['remaining'] == pytest.approx(700.0)
+        assert history[0]['remaining'] == 70_000
 
 
 # ══════════════════════════════════════════════════════════════════════════════

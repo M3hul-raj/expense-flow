@@ -110,8 +110,8 @@
             <div>
                 {% if budget_alert_level == 'danger' %}
                 <p class="fw-bold mb-0" style="color:var(--danger);">
-                    Budget Exceeded &mdash; You have spent <strong>₹{{ "%.0f"|format(current_month_spent) }}</strong>
-                    of your ₹{{ "%.0f"|format(budget) }} budget ({{ "%.0f"|format(budget_progress) }}% used).
+                    Budget Exceeded &mdash; You have spent <strong>{{ current_month_spent | currency(0) }}</strong>
+                    of your {{ budget | currency(0) }} budget ({{ "%.0f"|format(budget_progress) }}% used).
                 </p>
                 <p class="small mb-0" style="color:var(--danger);opacity:0.8;">
                     Consider reviewing your spending or increasing your budget for this month.
@@ -119,10 +119,10 @@
                 {% else %}
                 <p class="fw-bold mb-0" style="color:#92400E;">
                     Approaching Budget Limit &mdash; {{ "%.0f"|format(budget_progress) }}% used
-                    (₹{{ "%.0f"|format(current_month_spent) }} of ₹{{ "%.0f"|format(budget) }}).
+                    ({{ current_month_spent | currency(0) }} of {{ budget | currency(0) }}).
                 </p>
                 <p class="small mb-0" style="color:#92400E;opacity:0.8;">
-                    Only <strong>₹{{ "%.0f"|format(budget - current_month_spent) }}</strong> remaining this month.
+                    Only <strong>{{ (budget - current_month_spent) | currency(0) }}</strong> remaining this month.
                 </p>
                 {% endif %}
             </div>
@@ -157,7 +157,7 @@
                     <i class="fas fa-rupee-sign"></i>
                 </div>
                 <div>
-                    <div class="stat-amount">₹{{ "%.0f"|format(total_spent) }}</div>
+                    <div class="stat-amount">{{ total_spent | currency(0) }}</div>
                     <div class="stat-label">Total Spent</div>
                 </div>
             </div>
@@ -169,7 +169,7 @@
                     <i class="fas fa-calendar-alt"></i>
                 </div>
                 <div>
-                    <div class="stat-amount">₹{{ "%.0f"|format(current_month_spent) }}</div>
+                    <div class="stat-amount">{{ current_month_spent | currency(0) }}</div>
                     <div class="stat-label">This Month</div>
                 </div>
             </div>
@@ -181,7 +181,7 @@
                     <i class="fas fa-chart-line"></i>
                 </div>
                 <div>
-                    <div class="stat-amount">₹{{ "%.0f"|format(avg_daily_spend) }}</div>
+                    <div class="stat-amount">{{ avg_daily_spend | currency(0) }}</div>
                     <div class="stat-label">Daily Average</div>
                 </div>
             </div>
@@ -212,10 +212,10 @@
             </a>
         </div>
         <div class="d-flex align-items-center justify-content-between mb-2">
-            <span class="text-secondary small">₹{{ "%.0f"|format(current_month_spent) }} spent</span>
+            <span class="text-secondary small">{{ current_month_spent | currency(0) }} spent</span>
             <span class="fw-bold small
                 {% if budget_progress > 90 %}text-danger{% elif budget_progress > 75 %}text-warning{% else %}text-success{% endif %}">
-                {{ "%.1f"|format(budget_progress) }}% of ₹{{ "%.0f"|format(budget) }}
+                {{ "%.1f"|format(budget_progress) }}% of {{ budget | currency(0) }}
             </span>
         </div>
         <div class="budget-bar-wrap">
@@ -227,7 +227,7 @@
         {% if budget > 0 %}
         <p class="text-secondary small mt-2 mb-0">
             <i class="fas fa-info-circle me-1"></i>
-            ₹{{ "%.0f"|format([budget - current_month_spent, 0]|max) }} remaining this month
+            {{ ([budget - current_month_spent, 0]|max) | currency(0) }} remaining this month
         </p>
         {% endif %}
     </div>
@@ -320,7 +320,7 @@
                             </span>
                         </td>
                         <td class="text-secondary small">{{ (expense[3] or '')[:45] }}{% if expense[3] and expense[3]|length > 45 %}…{% endif %}</td>
-                        <td class="text-end recent-amount">₹{{ "%.2f"|format(expense[2]|float) }}</td>
+                        <td class="text-end recent-amount">{{ expense[5] | currency }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>

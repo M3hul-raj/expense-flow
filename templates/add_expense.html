@@ -115,7 +115,7 @@
                     Budget Status
                 </div>
                 <div class="d-flex align-items-center justify-content-between mb-2">
-                    <span class="text-secondary small">₹{{ "%.0f"|format(budget_spent) }} spent</span>
+                    <span class="text-secondary small">{{ budget_spent | currency(0) }} spent</span>
                     <span class="fw-bold small
                         {% if budget_pct > 90 %}text-danger{% elif budget_pct > 75 %}text-warning{% else %}text-success{% endif %}">
                         {{ "%.1f"|format(budget_pct) }}%
@@ -128,9 +128,9 @@
                 <p class="text-secondary small mt-2 mb-0">
                     <i class="fas fa-info-circle me-1"></i>
                     {% if budget_remaining > 0 %}
-                        <strong style="color:var(--success);">₹{{ "%.0f"|format(budget_remaining) }}</strong> remaining of ₹{{ "%.0f"|format(budget) }}
+                        <strong style="color:var(--success);">{{ budget_remaining | currency(0) }}</strong> remaining of {{ budget | currency(0) }}
                     {% else %}
-                        <strong style="color:var(--danger);">₹{{ "%.0f"|format(budget_remaining|abs) }}</strong> over budget
+                        <strong style="color:var(--danger);">{{ (budget_remaining|abs) | currency(0) }}</strong> over budget
                     {% endif %}
                 </p>
             </div>

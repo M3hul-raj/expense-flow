@@ -20,7 +20,7 @@ class User(db.Model):
     username      = db.Column(db.String(80),  unique=True, nullable=False, index=True)
     email         = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(256), nullable=False)
-    recurring_budget = db.Column(db.Float, nullable=True)
+    recurring_budget_paise = db.Column(db.BigInteger, nullable=True)
     registration_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     avatar        = db.Column(db.String(50), default='avatar_1', server_default=db.text("'avatar_1'"))
     display_name  = db.Column(db.String(80))
@@ -44,7 +44,7 @@ class Expense(db.Model):
     user_id        = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
     date           = db.Column(db.Date, nullable=False, index=True)
     category       = db.Column(db.String(50), nullable=False)
-    amount         = db.Column(db.Float, nullable=False)
+    amount_paise   = db.Column(db.BigInteger, nullable=False)
     description    = db.Column(db.String(255))
     payment_method = db.Column(db.String(50), default='Cash')
     created_at     = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
@@ -59,8 +59,8 @@ class Budget(db.Model):
     """Stores monthly budget targets per user."""
     id         = db.Column(db.Integer, primary_key=True)
     user_id    = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
-    year_month = db.Column(db.String(7), nullable=False)  # YYYY-MM
-    amount     = db.Column(db.Float, nullable=False)
+    year_month   = db.Column(db.String(7), nullable=False)  # YYYY-MM
+    amount_paise = db.Column(db.BigInteger, nullable=False)
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'year_month', name='unique_user_month_budget'),

@@ -70,7 +70,7 @@
                     <i class="fas fa-rupee-sign"></i>
                 </div>
                 <div>
-                    <div class="fw-bold" style="font-size:1.3rem;letter-spacing:-0.02em;">₹{{ "%.0f"|format(total_spent) }}</div>
+                    <div class="fw-bold" style="font-size:1.3rem;letter-spacing:-0.02em;">{{ total_spent | currency(0) }}</div>
                     <div class="text-secondary" style="font-size:0.78rem;text-transform:uppercase;letter-spacing:.05em;">Total Spent</div>
                 </div>
             </div>
@@ -217,7 +217,7 @@
                         data-description="{{ expense[3] or '' }}"
                         data-month="{{ expense[0][:7] }}"
                         data-payment="{{ expense[4] if expense[4] else 'N/A' }}"
-                        data-amount="{{ '%.2f'|format(expense[2]|float) }}"
+                        data-amount="{{ expense[2] }}"
                         data-date="{{ expense[0] }}">
                         <td class="text-secondary small fw-500" style="white-space:nowrap;">{{ expense[0] }}</td>
                         <td>
@@ -227,7 +227,7 @@
                         </td>
                         <td class="text-secondary small">{{ (expense[3] or '')[:60] }}{% if expense[3] and expense[3]|length > 60 %}…{% endif %}</td>
                         <td class="text-secondary small">{{ expense[4] if expense[4] else '—' }}</td>
-                        <td class="text-end fw-bold" style="color:var(--danger);white-space:nowrap;">₹{{ "%.2f"|format(expense[2]|float) }}</td>
+                        <td class="text-end fw-bold" style="color:var(--danger);white-space:nowrap;">{{ expense[6] | currency }}</td>
                         <td class="text-end" style="white-space:nowrap;">
                             <a href="{{ url_for('expenses.edit_expense', expense_id=expense[5]) }}" class="action-btn edit me-1" title="Edit">
                                 <i class="fas fa-pen"></i>
@@ -245,7 +245,7 @@
                 <tfoot>
                     <tr style="background: var(--bg-color);">
                         <td colspan="4" class="text-end fw-bold text-secondary px-4 py-3">Filtered Total</td>
-                        <td class="text-end fw-bold px-4 py-3" id="filteredTotal" style="color:var(--text-primary);">₹{{ "%.2f"|format(total_spent) }}</td>
+                        <td class="text-end fw-bold px-4 py-3" id="filteredTotal" style="color:var(--text-primary);">{{ total_spent | currency }}</td>
                         <td></td>
                     </tr>
                 </tfoot>
@@ -355,9 +355,12 @@
         document.getElementById('resultCount').textContent =
             `Showing ${Math.min(total, end - start)} of ${total} records`;
 
-        // Filtered total
-        const sum = filtered.reduce((s, r) => s + parseFloat(r.dataset.amount), 0);
-        document.getElementById('filteredTotal').textContent = '₹' + sum.toFixed(2);
+        // Filtered total (summed in integer paise to avoid JS float drift)
+        const sumPaise = filtered.reduce((s, r) => s + Math.round(parseFloat(r.dataset.amount) * 100), 0);
+        document.getElementById('filteredTotal').textContent = '₹' + (sumPaise / 100).toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
 
         // Page info
         document.getElementById('pageInfo').textContent =

@@ -429,8 +429,8 @@ class TestSetBudgetValidation:
         assert resp1.status_code == 200
         db.session.expire_all()
         row = Budget.query.filter_by(user_id=user.id, year_month='2026-05').first()
-        assert row is not None and row.amount == 4500.0
-        assert db.session.get(User, user.id).recurring_budget is None
+        assert row is not None and row.amount_paise == 450_000
+        assert db.session.get(User, user.id).recurring_budget_paise is None
 
         resp2 = auth_client.post(
             '/set_budget',
@@ -440,8 +440,8 @@ class TestSetBudgetValidation:
         assert resp2.status_code == 200
         db.session.expire_all()
         row2 = Budget.query.filter_by(user_id=user.id, year_month='2026-06').first()
-        assert row2 is not None and row2.amount == 6000.0
-        assert db.session.get(User, user.id).recurring_budget == 6000.0
+        assert row2 is not None and row2.amount_paise == 600_000
+        assert db.session.get(User, user.id).recurring_budget_paise == 600_000
 
 
 class TestPdfExportEscaping:
@@ -459,7 +459,7 @@ class TestPdfExportEscaping:
             user_id=user.id,
             date=py_date(2026, 7, 10),
             category='Shopping',
-            amount=499.0,
+            amount_paise=49_900,
             description='Coffee <b>bold & <online> snacks',
             payment_method='UPI',
         ))
@@ -467,7 +467,7 @@ class TestPdfExportEscaping:
             user_id=user.id,
             date=py_date(2026, 7, 11),
             category='Food',
-            amount=120.0,
+            amount_paise=12_000,
             description=('A' * 44) + '&Z',
             payment_method='Cash',
         ))
@@ -500,7 +500,7 @@ class TestDashboardRecentTransactions:
                 user_id=user.id,
                 date=py_date.fromisoformat(dt),
                 category='Food',
-                amount=50.0,
+                amount_paise=5_000,
                 description=desc,
                 payment_method='UPI',
             ))
@@ -817,14 +817,139 @@ class TestExpenseDateColumnAndQueries:
         assert month_date_range('2024-02') == (py_date(2024, 2, 1), py_date(2024, 3, 1))
         assert month_date_range('2026-12') == (py_date(2026, 12, 1), py_date(2027, 1, 1))
 
-        db.session.add(Expense(user_id=user.id, date=py_date(2024, 2, 29), category='Food', amount=100.0, payment_method='UPI'))
-        db.session.add(Expense(user_id=user.id, date=py_date(2024, 3, 1), category='Food', amount=50.0, payment_method='UPI'))
+        db.session.add(Expense(user_id=user.id, date=py_date(2024, 2, 29), category='Food', amount_paise=10_000, payment_method='UPI'))
+        db.session.add(Expense(user_id=user.id, date=py_date(2024, 3, 1), category='Food', amount_paise=5_000, payment_method='UPI'))
         db.session.commit()
 
-        assert get_monthly_spending(user.id, '2024-02') == 100.0
-        assert get_monthly_spending(user.id, '2024-03') == 50.0
+        assert get_monthly_spending(user.id, '2024-02') == 10_000
+        assert get_monthly_spending(user.id, '2024-03') == 5_000
 
         assert auth_client.get('/analytics?month=2024-02').status_code == 200
         assert auth_client.get('/export/pdf?month=2024-02').status_code == 200
         assert auth_client.get('/view').status_code == 200
         assert auth_client.get('/dashboard').status_code == 200
+
+
+class TestMoneyPaiseAndDecimalParsing:
+    """Tests ensuring BigInteger paise storage, Decimal HALF_UP parsing, and rupee formatting."""
+
+    def test_money_columns_use_biginteger_paise(self):
+        import sqlalchemy as sa
+        from models import Budget, Expense, User
+
+        assert isinstance(Expense.__table__.c.amount_paise.type, sa.BigInteger)
+        assert not hasattr(Expense.__table__.c, 'amount')
+        assert isinstance(Budget.__table__.c.amount_paise.type, sa.BigInteger)
+        assert not hasattr(Budget.__table__.c, 'amount')
+        assert isinstance(User.__table__.c.recurring_budget_paise.type, sa.BigInteger)
+        assert not hasattr(User.__table__.c, 'recurring_budget')
+
+    def test_decimal_input_parsing_half_up_and_strict_rejections(self):
+        from utils import parse_rupees_to_paise
+
+        assert parse_rupees_to_paise('0.10') == (10, None)
+        assert parse_rupees_to_paise('0.30') == (30, None)
+        assert parse_rupees_to_paise('19.99') == (1999, None)
+        assert parse_rupees_to_paise('10.125') == (1013, None)
+        assert parse_rupees_to_paise('0.005') == (1, None)
+        assert parse_rupees_to_paise('.5') == (50, None)
+        assert parse_rupees_to_paise('0.004') == (None, 'non_positive')
+        assert parse_rupees_to_paise('0') == (None, 'non_positive')
+        assert parse_rupees_to_paise('-12.34') == (None, 'non_positive')
+        for bad in ('', '   ', 'abc', 'nan', 'NaN', 'inf', '-inf', '1_000', '١٠٠', '1,000', '1e5'):
+            val, err = parse_rupees_to_paise(bad)
+            assert val is None and err in {'empty', 'invalid'}
+
+    def test_exact_paise_arithmetic_avoids_float_drift_and_supports_bigint_budgets(
+        self, auth_client, user
+    ):
+        from datetime import date as py_date
+        from models import Budget, Expense
+        from utils import format_paise_as_rupees, get_monthly_spending
+
+        auth_client.post('/add', data={
+            'date': '2026-07-09', 'category': 'Food',
+            'amount': '0.10', 'description': 'One', 'payment_method': 'UPI',
+        }, follow_redirects=True)
+        auth_client.post('/add', data={
+            'date': '2026-07-09', 'category': 'Food',
+            'amount': '0.20', 'description': 'Two', 'payment_method': 'UPI',
+        }, follow_redirects=True)
+        assert get_monthly_spending(user.id, '2026-07') == 30
+
+        # BigInteger > 32-bit int max (2,147,483,647 paise): ₹50,000,000.00 = 5,000,000,000 paise
+        resp_big = auth_client.post(
+            '/set_budget',
+            data={'month': '07', 'year': '2026', 'budget': '50000000.00', 'recurring': '1'},
+            follow_redirects=True,
+        )
+        assert resp_big.status_code == 200
+        db.session.expire_all()
+        assert Budget.query.filter_by(user_id=user.id, year_month='2026-07').one().amount_paise == 5_000_000_000
+        assert db.session.get(User, user.id).recurring_budget_paise == 5_000_000_000
+
+        # Display formatting back to rupees
+        assert format_paise_as_rupees(30) == '₹0.30'
+        assert format_paise_as_rupees(123456) == '₹1,234.56'
+        assert format_paise_as_rupees(-5000) == '-₹50.00'
+
+        # Views render rupees (never raw paise like 5000000000 or 9876)
+        db.session.add(Expense(
+            user_id=user.id,
+            date=py_date(2026, 7, 10),
+            category='Shopping',
+            amount_paise=9876,
+            description='ExactPaiseItem',
+            payment_method='Card',
+        ))
+        db.session.commit()
+
+        view_html = auth_client.get('/view').data.decode('utf-8')
+        assert '₹98.76' in view_html
+        assert '9876' not in view_html
+
+        dash_html = auth_client.get('/dashboard').data.decode('utf-8')
+        assert '₹98.76' in dash_html
+
+        analytics_html = auth_client.get('/analytics?month=2026-07').data.decode('utf-8')
+        assert '₹98.76' in analytics_html
+
+        exp = Expense.query.filter_by(user_id=user.id, description='ExactPaiseItem').one()
+        edit_html = auth_client.get(f'/edit/{exp.id}').data.decode('utf-8')
+        assert 'value="98.76"' in edit_html
+
+        budget_html = auth_client.get('/set_budget').data.decode('utf-8')
+        assert '50000000.00' in budget_html
+        assert '5000000000' not in budget_html
+
+    @pytest.mark.parametrize('bad_amount', ['abc', 'nan', 'inf', '1_000', '١٠٠', '0.004', '10000001'])
+    def test_add_and_edit_expense_reject_invalid_or_oversized_decimal_amounts(
+        self, auth_client, user, bad_amount
+    ):
+        from models import Expense
+
+        resp_add = auth_client.post('/add', data={
+            'date': '2026-07-09', 'category': 'Food',
+            'amount': bad_amount, 'description': 'bad', 'payment_method': 'Cash',
+        }, follow_redirects=True)
+        assert resp_add.status_code == 200
+        assert Expense.query.filter_by(user_id=user.id).count() == 0
+
+        valid = Expense(
+            user_id=user.id,
+            date=__import__('datetime').date(2026, 7, 9),
+            category='Food',
+            amount_paise=5000,
+            description='ok',
+            payment_method='Cash',
+        )
+        db.session.add(valid)
+        db.session.commit()
+
+        resp_edit = auth_client.post(f'/edit/{valid.id}', data={
+            'date': '2026-07-09', 'category': 'Food',
+            'amount': bad_amount, 'description': 'still-ok', 'payment_method': 'Cash',
+        }, follow_redirects=True)
+        assert resp_edit.status_code == 200
+        db.session.expire_all()
+        assert db.session.get(Expense, valid.id).amount_paise == 5000
