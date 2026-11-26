@@ -626,3 +626,61 @@ async function dispatchFetch(url, { mode = 'cors', destination = '', accept = '*
         assert results['manifestMiss']['status'] >= 400
         assert results['navOfflineNoCache']['status'] == 503
 
+
+class TestLoggingPrivacy:
+    """Tests ensuring auth logs never contain email addresses or raw submitted identifiers."""
+
+    def test_register_logs_user_id_only(self, client, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO, logger='expenseflow'):
+            resp = client.post(
+                '/register',
+                data={
+                    'username': 'priv_user',
+                    'email': 'priv_secret@example.com',
+                    'password': 'password123',
+                    'confirm_password': 'password123',
+                },
+                follow_redirects=False,
+            )
+        assert resp.status_code == 302
+        created = User.query.filter_by(username='priv_user').first()
+        assert created is not None
+        assert f'New user registered: id={created.id}' in caplog.text
+        assert 'priv_secret@example.com' not in caplog.text
+        assert 'priv_user' not in caplog.text
+
+    def test_login_and_logout_never_log_emails_or_submitted_identifiers(
+        self, client, user, caplog
+    ):
+        import logging
+
+        unknown_ident = 'mistyped_secret_identifier@example.com'
+        with caplog.at_level(logging.INFO, logger='expenseflow'):
+            client.post(
+                '/login',
+                data={'username': unknown_ident, 'password': 'wrong'},
+                follow_redirects=False,
+            )
+            client.post(
+                '/login',
+                data={'username': user.email, 'password': 'wrong'},
+                follow_redirects=False,
+            )
+            client.post(
+                '/login',
+                data={'username': user.email, 'password': 'password123'},
+                follow_redirects=False,
+            )
+            client.get('/logout', follow_redirects=False)
+
+        assert 'Login attempt for unknown user' in caplog.text
+        assert f'Wrong password for user: id={user.id}' in caplog.text
+        assert f'User logged in: id={user.id}' in caplog.text
+        assert f'User logged out: id={user.id}' in caplog.text
+        assert unknown_ident not in caplog.text
+        assert user.email not in caplog.text
+        assert user.username not in caplog.text
+
+
