@@ -23,13 +23,25 @@ MIN_SECRET_KEY_LENGTH = 32
 VALID_ENVS = {'production', 'development', 'testing'}
 
 
-def create_app(config_name=None):
+def normalize_database_uri(uri):
+    """Normalize PostgreSQL URLs to use the psycopg (v3) SQLAlchemy dialect."""
+    if not uri:
+        return uri
+    cleaned = uri.strip()
+    if cleaned.startswith('postgres://'):
+        return 'postgresql+psycopg://' + cleaned[len('postgres://'):]
+    if cleaned.startswith('postgresql://'):
+        return 'postgresql+psycopg://' + cleaned[len('postgresql://'):]
+    return cleaned
+
+
+def create_app(config_name=None, database_uri=None):
     """
     Application factory.
 
     config_name='production'  →  requires EXPENSEFLOW_SECRET_KEY, secure cookies, file/env DB.
     config_name='development' →  allows dev fallback secret key and HTTP cookies.
-    config_name='testing'     →  in-memory SQLite, CSRF + rate-limit disabled.
+    config_name='testing'     →  in-memory SQLite (or explicit database_uri), CSRF + rate-limit disabled.
 
     If config_name is omitted, EXPENSEFLOW_ENV (defaulting to 'production') is used.
     """
@@ -74,18 +86,26 @@ def create_app(config_name=None):
     app.config['SESSION_COOKIE_SECURE'] = (env != 'development')
 
     if env == 'testing':
+        raw_uri = (database_uri or '').strip() or 'sqlite:///:memory:'
+        db_uri = normalize_database_uri(raw_uri)
         app.config.update({
             'TESTING': True,
-            'SQLALCHEMY_DATABASE_URI': 'sqlite:///:memory:',
+            'SQLALCHEMY_DATABASE_URI': db_uri,
             'WTF_CSRF_ENABLED': False,
             'WTF_CSRF_CHECK_DEFAULT': False,
             'RATELIMIT_ENABLED': False,
         })
     else:
-        app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-            'EXPENSEFLOW_DATABASE_URI',
-            'sqlite:///expenses.db',
+        raw_uri = (
+            (database_uri or '').strip()
+            or os.environ.get('EXPENSEFLOW_DATABASE_URI', '').strip()
+            or 'sqlite:///expenses.db'
         )
+        db_uri = normalize_database_uri(raw_uri)
+        app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
+
+    if db_uri.startswith('postgresql+'):
+        app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {'pool_pre_ping': True}
 
     # ── Extensions ────────────────────────────────────────────────────────
     db.init_app(app)

@@ -5,7 +5,7 @@ Isolation guarantee
 ───────────────────
 Each test function gets a completely fresh Flask application instance created
 via create_app('testing'), which uses:
-  - sqlite:///:memory:   (never touches the real expenses.db)
+  - sqlite:///:memory: by default (or EXPENSEFLOW_TEST_DATABASE_URI when set)
   - WTF_CSRF_ENABLED=False
   - RATELIMIT_ENABLED=False
 
@@ -14,6 +14,7 @@ The old _swap_engine private-attribute hack is gone entirely — it was only
 needed because we were mutating the module-level app object.  The factory
 gives each test its own isolated app with no shared state.
 """
+import os
 import pytest
 from app import create_app
 from models import db, User, Expense, Budget
@@ -24,16 +25,18 @@ from models import db, User, Expense, Budget
 @pytest.fixture(scope='function')
 def app():
     """
-    Fresh Flask app pointing at an isolated in-memory SQLite database.
+    Fresh Flask app pointing at an isolated test database.
     Tables are created before the test and dropped after it; the real
-    expenses.db is never touched.
+    expenses.db and EXPENSEFLOW_DATABASE_URI are never touched.
     """
-    application = create_app('testing')
+    test_db_uri = os.environ.get('EXPENSEFLOW_TEST_DATABASE_URI', '').strip() or None
+    application = create_app('testing', database_uri=test_db_uri)
     with application.app_context():
         db.create_all()
         yield application
         db.session.remove()
         db.drop_all()
+        db.engine.dispose()
 
 
 @pytest.fixture
