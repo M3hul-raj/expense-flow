@@ -8,7 +8,7 @@ import pytest
 
 import app as app_module
 from app import create_app
-from models import db
+from models import db, User
 
 
 class TestSecretKeyAndSessionConfig:
@@ -143,4 +143,159 @@ class TestLoginEnumeration:
         assert b'Invalid username/email or password.' in page_wrong_pw.data
         assert b'User does not exist' not in page_unknown.data
         assert b'Invalid password' not in page_wrong_pw.data
+
+
+class TestEditProfileValidation:
+    """Tests for /edit_profile validation, email password gate, avatars, and IntegrityError."""
+
+    def test_missing_form_keys_handled_without_error(self, auth_client, user):
+        """Submitting empty form data must flash validation error, not raise 400/500."""
+        resp = auth_client.post('/edit_profile', data={}, follow_redirects=True)
+        assert resp.status_code == 200
+        assert b'Username must be at least 3 characters long.' in resp.data
+        db.session.expire_all()
+        assert db.session.get(User, user.id).username == 'alice'
+
+    @pytest.mark.parametrize('bad_username', ['ab', 'a' * 31, 'bad user!', 'alice-1'])
+    def test_invalid_username_rejected(self, auth_client, user, bad_username):
+        resp = auth_client.post(
+            '/edit_profile',
+            data={'username': bad_username, 'email': user.email},
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        db.session.expire_all()
+        assert db.session.get(User, user.id).username == 'alice'
+
+    @pytest.mark.parametrize('bad_email', ['notanemail', '@example.com', 'a@.com', 'a b@c.com'])
+    def test_invalid_email_rejected(self, auth_client, user, bad_email):
+        resp = auth_client.post(
+            '/edit_profile',
+            data={
+                'username': user.username,
+                'email': bad_email,
+                'current_password': 'password123',
+            },
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        assert b'valid email' in resp.data
+        db.session.expire_all()
+        assert db.session.get(User, user.id).email == 'alice@test.com'
+
+    def test_email_change_requires_current_password(self, auth_client, user):
+        """Changing email without valid current_password must be rejected."""
+        resp_missing = auth_client.post(
+            '/edit_profile',
+            data={'username': user.username, 'email': 'alice_new@test.com'},
+            follow_redirects=True,
+        )
+        assert resp_missing.status_code == 200
+        assert b'Current password is required' in resp_missing.data
+
+        resp_wrong = auth_client.post(
+            '/edit_profile',
+            data={
+                'username': user.username,
+                'email': 'alice_new@test.com',
+                'current_password': 'wrong-password',
+            },
+            follow_redirects=True,
+        )
+        assert resp_wrong.status_code == 200
+        assert b'Current password is required' in resp_wrong.data
+
+        db.session.expire_all()
+        assert db.session.get(User, user.id).email == 'alice@test.com'
+
+    def test_email_change_succeeds_with_valid_current_password(self, auth_client, user):
+        resp = auth_client.post(
+            '/edit_profile',
+            data={
+                'username': user.username,
+                'email': 'alice_new@test.com',
+                'current_password': 'password123',
+            },
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        db.session.expire_all()
+        assert db.session.get(User, user.id).email == 'alice_new@test.com'
+
+    @pytest.mark.parametrize('bad_avatar', ['avatar_0', 'avatar_41', 'avatar-1', 'evil'])
+    def test_invalid_avatar_rejected(self, auth_client, user, bad_avatar):
+        resp = auth_client.post(
+            '/edit_profile',
+            data={
+                'username': user.username,
+                'email': user.email,
+                'avatar': bad_avatar,
+            },
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        assert b'valid avatar' in resp.data
+        db.session.expire_all()
+        assert db.session.get(User, user.id).avatar == 'avatar_1'
+
+    @pytest.mark.parametrize('stored_avatar', ['avatar_1', 'avatar_16', 'avatar_40'])
+    def test_existing_stored_avatars_pass(self, auth_client, user, stored_avatar):
+        resp = auth_client.post(
+            '/edit_profile',
+            data={
+                'username': user.username,
+                'email': user.email,
+                'avatar': stored_avatar,
+            },
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        db.session.expire_all()
+        assert db.session.get(User, user.id).avatar == stored_avatar
+
+    def test_avatars_css_defines_class_for_every_avatar_id(self):
+        from pathlib import Path
+        import re
+        from blueprints.auth import AVATAR_COUNT
+
+        css_path = Path(__file__).resolve().parent.parent / 'static' / 'avatars.css'
+        css_text = css_path.read_text(encoding='utf-8')
+        defined = set(re.findall(r'\.avatar-(\d+)\b', css_text))
+        expected = {str(i) for i in range(1, AVATAR_COUNT + 1)}
+        assert expected <= defined
+
+    def test_duplicate_username_or_email_rejected(self, auth_client, user, user2):
+        resp_u = auth_client.post(
+            '/edit_profile',
+            data={'username': user2.username, 'email': user.email},
+            follow_redirects=True,
+        )
+        assert b'Username already exists' in resp_u.data
+
+        resp_e = auth_client.post(
+            '/edit_profile',
+            data={
+                'username': user.username,
+                'email': user2.email,
+                'current_password': 'password123',
+            },
+            follow_redirects=True,
+        )
+        assert b'Email already in use' in resp_e.data
+
+    def test_integrity_error_handled_without_500(self, auth_client, user, monkeypatch):
+        from sqlalchemy.exc import IntegrityError
+
+        def raise_integrity_error():
+            raise IntegrityError('UPDATE user', {}, Exception('UNIQUE constraint failed'))
+
+        monkeypatch.setattr(db.session, 'commit', raise_integrity_error)
+        resp = auth_client.post(
+            '/edit_profile',
+            data={'username': 'alice_renamed', 'email': user.email},
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        assert b'already in use' in resp.data
+
 
