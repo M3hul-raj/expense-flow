@@ -215,3 +215,207 @@ class TestDeployScriptModes:
         assert 'requirements.lock' in res.stdout
         assert 'alembic stamp' not in res.stdout
         assert 'upgrade head' not in res.stdout
+
+
+class TestSchemaReconciliation:
+    """Acceptance tests for 0002_reconcile_prod_schema across legacy SQLite, fresh SQLite, and Postgres."""
+
+    @staticmethod
+    def _create_legacy_stage1a_db(db_file, seed_data=False):
+        conn = sqlite3.connect(db_file)
+        try:
+            conn.execute('PRAGMA foreign_keys=ON')
+            conn.executescript(
+                """
+                CREATE TABLE user (
+                    id INTEGER NOT NULL,
+                    username VARCHAR(80) NOT NULL,
+                    email VARCHAR(120) NOT NULL,
+                    password_hash VARCHAR(256) NOT NULL,
+                    recurring_budget FLOAT,
+                    registration_date DATETIME,
+                    avatar VARCHAR(50) DEFAULT 'avatar_1',
+                    display_name VARCHAR(80),
+                    PRIMARY KEY (id),
+                    UNIQUE (username),
+                    UNIQUE (email)
+                );
+                CREATE TABLE expense (
+                    id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    date VARCHAR(10) NOT NULL,
+                    category VARCHAR(50) NOT NULL,
+                    amount FLOAT NOT NULL,
+                    description VARCHAR(255),
+                    payment_method VARCHAR(50),
+                    created_at DATETIME,
+                    PRIMARY KEY (id),
+                    FOREIGN KEY(user_id) REFERENCES user (id)
+                );
+                CREATE TABLE budget (
+                    id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    year_month VARCHAR(7) NOT NULL,
+                    amount FLOAT NOT NULL,
+                    PRIMARY KEY (id),
+                    CONSTRAINT unique_user_month_budget UNIQUE (user_id, year_month),
+                    FOREIGN KEY(user_id) REFERENCES user (id)
+                );
+                """
+            )
+            if seed_data:
+                conn.execute(
+                    "INSERT INTO user (id, username, email, password_hash, recurring_budget) VALUES (1, 'Alice', 'Alice@Test.com', 'hash1', 3000.0)"
+                )
+                conn.execute(
+                    "INSERT INTO budget (id, user_id, year_month, amount) VALUES (1, 1, '2026-11', 5000.0)"
+                )
+                conn.execute(
+                    "INSERT INTO expense (id, user_id, date, category, amount, description, payment_method) VALUES (1, 1, '2026-11-26', 'Food', 149.5, 'Dinner', 'UPI')"
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _unexplained_diffs(engine):
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+
+        with engine.connect() as conn:
+            insp = sa.inspect(conn)
+            user_unique_cols = (
+                {tuple(u['column_names']) for u in insp.get_unique_constraints('user')}
+                | {tuple(i['column_names']) for i in insp.get_indexes('user') if i.get('unique')}
+            )
+            ctx = MigrationContext.configure(
+                conn, opts={'compare_type': True, 'compare_server_default': True}
+            )
+            raw_diffs = compare_metadata(ctx, db.metadata)
+
+        filtered = []
+        for diff in raw_diffs:
+            if (
+                isinstance(diff, tuple)
+                and diff[0] == 'add_index'
+                and diff[1].table.name == 'user'
+                and diff[1].unique
+                and tuple(c.name for c in diff[1].columns) in user_unique_cols
+            ):
+                continue
+            filtered.append(diff)
+        return filtered
+
+    def test_reconcile_legacy_stage1a_sqlite_preserves_user_and_adds_missing_indexes(self, tmp_path):
+        db_file = tmp_path / 'legacy_prod_copy.db'
+        self._create_legacy_stage1a_db(db_file, seed_data=True)
+        uri = f"sqlite:///{db_file.as_posix()}"
+        cfg = _alembic_config(uri)
+
+        command.stamp(cfg, '0001_baseline')
+        command.upgrade(cfg, '0002_reconcile_prod_schema')
+
+        engine = sa.create_engine(uri)
+        try:
+            insp = sa.inspect(engine)
+            assert 'ix_budget_user_id' in {i['name'] for i in insp.get_indexes('budget')}
+            assert {'ix_expense_user_id', 'ix_expense_date', 'idx_expense_user_date'}.issubset(
+                {i['name'] for i in insp.get_indexes('expense')}
+            )
+            # Preserved existing UNIQUE constraints on user without rebuilding or creating duplicate indexes
+            assert insp.get_indexes('user') == []
+            assert {tuple(u['column_names']) for u in insp.get_unique_constraints('user')} == {
+                ('username',),
+                ('email',),
+            }
+            assert len(insp.get_unique_constraints('user')) == 2
+            assert self._unexplained_diffs(engine) == []
+
+            with engine.connect() as conn:
+                fk_violations = list(conn.execute(sa.text('PRAGMA foreign_key_check')))
+                assert fk_violations == []
+                assert conn.execute(sa.text('SELECT COUNT(*) FROM "user"')).scalar_one() == 1
+                assert conn.execute(sa.text('SELECT COUNT(*) FROM budget')).scalar_one() == 1
+                assert conn.execute(sa.text('SELECT COUNT(*) FROM expense')).scalar_one() == 1
+                assert conn.execute(sa.text('SELECT amount FROM expense WHERE id = 1')).scalar_one() == 149.5
+        finally:
+            engine.dispose()
+
+    def test_reconcile_fresh_sqlite_and_postgres_upgrade_downgrade(self, tmp_path):
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'reconcile_fresh.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, '0001_baseline')
+            command.upgrade(cfg, '0002_reconcile_prod_schema')
+
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                assert compare_metadata(ctx, db.metadata) == []
+                insp = sa.inspect(conn)
+                user_indexes = insp.get_indexes('user')
+                assert {i['name'] for i in user_indexes} == {'ix_user_username', 'ix_user_email'}
+                assert len(user_indexes) == 2
+
+            command.downgrade(cfg, '0001_baseline')
+            insp_down = sa.inspect(engine)
+            assert 'idx_expense_user_date' in {i['name'] for i in insp_down.get_indexes('expense')}
+            assert 'ix_budget_user_id' in {i['name'] for i in insp_down.get_indexes('budget')}
+
+            command.upgrade(cfg, '0002_reconcile_prod_schema')
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                assert compare_metadata(ctx, db.metadata) == []
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+            engine.dispose()
+
+    def test_m4a_expense_alter_succeeds_after_reconciliation(self, tmp_path):
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+
+        db_file = tmp_path / 'reconcile_then_m4a.db'
+        self._create_legacy_stage1a_db(db_file, seed_data=True)
+        uri = f"sqlite:///{db_file.as_posix()}"
+        cfg = _alembic_config(uri)
+
+        command.stamp(cfg, '0001_baseline')
+        command.upgrade(cfg, '0002_reconcile_prod_schema')
+
+        engine = sa.create_engine(uri)
+        try:
+            with engine.begin() as conn:
+                op = Operations(MigrationContext.configure(conn))
+                with op.batch_alter_table('expense') as batch_op:
+                    batch_op.alter_column(
+                        'date',
+                        existing_type=sa.String(length=10),
+                        type_=sa.Date(),
+                        existing_nullable=False,
+                    )
+                    batch_op.drop_index('idx_expense_user_date')
+                    batch_op.create_index('idx_expense_user_date_id', ['user_id', 'date', 'id'], unique=False)
+
+            insp = sa.inspect(engine)
+            expense_indexes = {i['name'] for i in insp.get_indexes('expense')}
+            assert 'idx_expense_user_date_id' in expense_indexes
+            assert 'idx_expense_user_date' not in expense_indexes
+            assert insp.get_foreign_keys('expense')[0]['referred_table'] == 'user'
+            with engine.connect() as conn:
+                assert list(conn.execute(sa.text('PRAGMA foreign_key_check'))) == []
+                assert conn.execute(sa.text('SELECT COUNT(*) FROM expense')).scalar_one() == 1
+        finally:
+            engine.dispose()
