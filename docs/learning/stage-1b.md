@@ -9,3 +9,8 @@
 - **What it is:** A dual-engine CI pipeline running the test matrix on SQLite (`3.10`–`3.13`) alongside an ephemeral `postgres:16-alpine` service container on every branch push and PR.
 - **Why it exists:** SQLite silently accepts practices that fail in PostgreSQL (strict `VARCHAR` lengths, foreign keys, `ORDER BY` index behavior, case-sensitive `=`). Catching Postgres bugs on branch pushes stops schema regressions before they ever touch `main` or production.
 - **Interview Q:** *What breaks first when moving a Flask test suite from SQLite to PostgreSQL in CI?* Unenforced foreign keys (`user_id` orphans), `db.session.rollback()` after `IntegrityError`, connection reuse across tests (`db.engine.dispose()`), and SQL syntax/index behavior differences (`startswith` vs date ranges).
+
+## M2B — Universal Dependency Lock Files (`uv`)
+- **What it is:** Direct dependencies in `requirements.in` and `requirements-postgres.in`, compiled with `uv pip compile --universal --python-version 3.10` into exact `requirements.lock` and `requirements-postgres.lock` files.
+- **Why it exists:** Pinning only direct packages lets Python `3.10` (PythonAnywhere) and `3.13` (local/Docker) pull incompatible transitive versions (e.g., SQLAlchemy `2.1.x` dropped Python `3.10`, while `uv` locks `2.0.58` for `<3.11` and `2.1.9` for `>=3.11`), while keeping `psycopg` completely out of PythonAnywhere installs.
+- **Interview Q:** *Why choose `uv pip compile --universal` over `pip freeze` or plain `pip-compile`?* `pip freeze` dumps OS- and Python-specific packages (like dev tools or Windows `colorama`), and standard `pip-compile` locks only the host's Python/OS; `--universal` resolves one cross-OS, cross-version lock file using PEP 508 markers that `pip install` still reads natively.
