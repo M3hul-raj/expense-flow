@@ -682,4 +682,3 @@ class TestLoggingPrivacy:
         assert unknown_ident not in caplog.text
         assert user.email not in caplog.text
         assert user.username not in caplog.text
-
