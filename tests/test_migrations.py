@@ -66,7 +66,8 @@ class TestAlembicBaseline:
             assert {'user', 'expense', 'budget', 'alembic_version'}.issubset(set(insp.get_table_names()))
 
             expense_indexes = {idx['name'] for idx in insp.get_indexes('expense')}
-            assert {'ix_expense_user_id', 'ix_expense_date', 'idx_expense_user_date'}.issubset(expense_indexes)
+            assert {'ix_expense_user_id', 'ix_expense_date', 'idx_expense_user_date_id'}.issubset(expense_indexes)
+            assert 'idx_expense_user_date' not in expense_indexes
 
             budget_uqs = {uq['name'] for uq in insp.get_unique_constraints('budget')}
             assert 'unique_user_month_budget' in budget_uqs
@@ -524,4 +525,157 @@ class TestExpenseDateMigration:
                 ver = conn.execute(sa.text('SELECT version_num FROM alembic_version')).scalar_one()
                 assert ver == '0002_reconcile_prod_schema'
         finally:
+            engine.dispose()
+
+
+class TestExpenseOrderingIndex:
+    """Tests for 0004_expense_ordering_index replacing idx_expense_user_date and EXPLAIN plans."""
+
+    def test_0004_replaces_expense_date_index_with_user_date_id_and_downgrades(self, tmp_path):
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'ord_idx.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, '0003_expense_date_type')
+            insp_before = sa.inspect(engine)
+            names_before = {i['name'] for i in insp_before.get_indexes('expense')}
+            assert 'idx_expense_user_date' in names_before
+            assert 'idx_expense_user_date_id' not in names_before
+
+            command.upgrade(cfg, '0004_expense_ordering_index')
+            insp_up = sa.inspect(engine)
+            indexes_up = {i['name']: i for i in insp_up.get_indexes('expense')}
+            assert 'idx_expense_user_date_id' in indexes_up
+            assert 'idx_expense_user_date' not in indexes_up
+            assert indexes_up['idx_expense_user_date_id']['column_names'] == ['user_id', 'date', 'id']
+            assert not indexes_up['idx_expense_user_date_id']['unique']
+            assert {'ix_expense_user_id', 'ix_expense_date'}.issubset(indexes_up.keys())
+
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                assert compare_metadata(ctx, db.metadata) == []
+
+            command.downgrade(cfg, '0003_expense_date_type')
+            insp_down = sa.inspect(engine)
+            indexes_down = {i['name']: i for i in insp_down.get_indexes('expense')}
+            assert 'idx_expense_user_date' in indexes_down
+            assert 'idx_expense_user_date_id' not in indexes_down
+            assert indexes_down['idx_expense_user_date']['column_names'] == ['user_id', 'date']
+
+            command.upgrade(cfg, '0004_expense_ordering_index')
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+            engine.dispose()
+
+    def test_0004_explain_plans_use_ordering_index_without_sort(self, tmp_path):
+        from datetime import date as py_date, timedelta
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'explain_idx.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, 'head')
+
+            user_rows = [
+                {
+                    'id': u,
+                    'username': f'planuser{u}',
+                    'email': f'plan{u}@example.com',
+                    'password_hash': 'h',
+                    'avatar': 'avatar_1',
+                }
+                for u in range(1, 21)
+            ]
+            base_day = py_date(2026, 1, 1)
+            exp_rows = [
+                {
+                    'user_id': (i % 20) + 1,
+                    'date': (
+                        base_day + timedelta(days=(i // 40))
+                        if is_postgres
+                        else (base_day + timedelta(days=(i // 40))).isoformat()
+                    ),
+                    'category': 'Food',
+                    'amount': 50.0 + (i % 10),
+                    'description': f'row {i}',
+                    'payment_method': 'UPI',
+                }
+                for i in range(1000)
+            ]
+
+            with engine.begin() as conn:
+                conn.execute(
+                    sa.text(
+                        """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                           VALUES (:id, :username, :email, :password_hash, CURRENT_TIMESTAMP, :avatar)"""
+                    ),
+                    user_rows,
+                )
+                conn.execute(
+                    sa.text(
+                        """INSERT INTO expense (user_id, date, category, amount, description, payment_method, created_at)
+                           VALUES (:user_id, :date, :category, :amount, :description, :payment_method, CURRENT_TIMESTAMP)"""
+                    ),
+                    exp_rows,
+                )
+                conn.execute(sa.text('ANALYZE expense'))
+
+            query_full = (
+                'SELECT id, user_id, date, category, amount, description, payment_method, created_at '
+                'FROM expense WHERE user_id = :uid ORDER BY date DESC, id DESC'
+            )
+            query_limit = f'{query_full} LIMIT 5'
+            query_month_limit = (
+                'SELECT id, user_id, date, category, amount, description, payment_method, created_at '
+                'FROM expense WHERE user_id = :uid AND date >= :start_d AND date < :end_d '
+                'ORDER BY date DESC, id DESC LIMIT 10'
+            )
+            start_d = py_date(2026, 1, 1) if is_postgres else '2026-01-01'
+            end_d = py_date(2026, 2, 1) if is_postgres else '2026-02-01'
+
+            with engine.connect() as conn:
+                if is_postgres:
+                    for sql, params in (
+                        (query_limit, {'uid': 1}),
+                        (query_month_limit, {'uid': 1, 'start_d': start_d, 'end_d': end_d}),
+                    ):
+                        plan_lines = [
+                            r[0]
+                            for r in conn.execute(sa.text(f'EXPLAIN (FORMAT TEXT) {sql}'), params)
+                        ]
+                        plan_text = '\n'.join(plan_lines)
+                        assert 'Index Scan Backward using idx_expense_user_date_id' in plan_text, plan_text
+                        assert not any('Sort' in line for line in plan_lines), plan_text
+                else:
+                    for sql, params in (
+                        (query_full, {'uid': 1}),
+                        (query_limit, {'uid': 1}),
+                        (query_month_limit, {'uid': 1, 'start_d': start_d, 'end_d': end_d}),
+                    ):
+                        plan_rows = [
+                            r[-1]
+                            for r in conn.execute(sa.text(f'EXPLAIN QUERY PLAN {sql}'), params)
+                        ]
+                        plan_text = '\n'.join(plan_rows)
+                        assert 'idx_expense_user_date_id' in plan_text, plan_text
+                        assert 'USE TEMP B-TREE FOR ORDER BY' not in plan_text, plan_text
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
             engine.dispose()

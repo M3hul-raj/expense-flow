@@ -49,9 +49,9 @@ class Expense(db.Model):
     payment_method = db.Column(db.String(50), default='Cash')
     created_at     = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
-    # Composite index for the most common query pattern: filter by user then month prefix
+    # Composite index covering WHERE user_id = ? ORDER BY date DESC, id DESC via backward scan
     __table_args__ = (
-        db.Index('idx_expense_user_date', 'user_id', 'date'),
+        db.Index('idx_expense_user_date_id', 'user_id', 'date', 'id'),
     )
 
 
