@@ -38,9 +38,9 @@ def create_app(config_name=None):
         raise ValueError(f"Unknown ExpenseFlow environment: {env!r}")
 
     if env == 'production':
-        secret_key = os.environ.get('EXPENSEFLOW_SECRET_KEY', '')
+        secret_key = os.environ.get('EXPENSEFLOW_SECRET_KEY', '').strip()
         if (
-            len(secret_key.strip()) < MIN_SECRET_KEY_LENGTH
+            len(secret_key) < MIN_SECRET_KEY_LENGTH
             or secret_key in {DEV_FALLBACK_SECRET_KEY, TEST_FALLBACK_SECRET_KEY}
         ):
             raise RuntimeError(

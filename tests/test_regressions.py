@@ -32,13 +32,16 @@ class TestSecretKeyAndSessionConfig:
             '   ',
             'too-short-secret',
             'x' * 31,
+            '  ' + ('x' * 31) + '  ',
             'dev-only-fallback-change-in-prod-!@#',
+            '  dev-only-fallback-change-in-prod-!@#  ',
+            '       test-only-secret-key       ',
         ],
     )
     def test_production_rejects_blank_short_or_fallback_secret_key(
         self, monkeypatch, tmp_path, bad_key
     ):
-        """create_app('production') must reject blank, <32-char, or fallback keys."""
+        """create_app('production') must reject blank, <32-char, or fallback keys (even padded)."""
         monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', bad_key)
         monkeypatch.setenv(
             'EXPENSEFLOW_DATABASE_URI',
@@ -47,6 +50,22 @@ class TestSecretKeyAndSessionConfig:
 
         with pytest.raises(RuntimeError, match='EXPENSEFLOW_SECRET_KEY'):
             create_app('production')
+
+    def test_production_strips_surrounding_whitespace_from_valid_secret_key(
+        self, monkeypatch, tmp_path
+    ):
+        """Validated stripped key must match the active app.secret_key."""
+        db_file = tmp_path / 'prod_stripped.db'
+        strong_key = 'prod-secret-key-with-at-least-32-chars!!'
+        monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', f'  {strong_key}\n')
+        monkeypatch.setenv('EXPENSEFLOW_DATABASE_URI', f"sqlite:///{db_file.as_posix()}")
+
+        prod_app = create_app('production')
+        try:
+            assert prod_app.secret_key == strong_key
+        finally:
+            with prod_app.app_context():
+                db.engine.dispose()
 
     def test_production_sets_secure_session_cookie_flags(self, monkeypatch, tmp_path):
         """Production must set strict session cookie flags and use configured DB URI."""
