@@ -141,4 +141,4 @@ def __getattr__(name):
 
 if __name__ == '__main__':
     run_env = os.environ.get('EXPENSEFLOW_ENV', 'development')
-    create_app(run_env).run(debug=(run_env == 'development'), host='0.0.0.0', port=5000)
+    create_app(run_env).run(debug=(run_env == 'development'), host='127.0.0.1', port=5000)
