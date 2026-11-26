@@ -745,3 +745,52 @@ class TestDatabaseConfig:
         finally:
             with override_app.app_context():
                 db.engine.dispose()
+
+
+class TestDependencyLockfiles:
+    """Tests ensuring universal lockfiles exist, pin exact versions, and keep psycopg out of base installs."""
+
+    @staticmethod
+    def _package_lines(filename):
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        lines = []
+        for raw in (root / filename).read_text(encoding='utf-8').splitlines():
+            stripped = raw.strip()
+            if not stripped or stripped.startswith('#') or stripped.startswith('-'):
+                continue
+            lines.append(stripped)
+        return lines
+
+    def test_lockfiles_and_direct_inputs_exist(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        for name in (
+            'requirements.in',
+            'requirements.lock',
+            'requirements-postgres.in',
+            'requirements-postgres.lock',
+        ):
+            assert (root / name).is_file(), f'Missing dependency file: {name}'
+
+    def test_base_lockfile_excludes_psycopg_and_pins_all_packages(self):
+        base_lines = self._package_lines('requirements.lock')
+        assert base_lines, 'requirements.lock must not be empty'
+        for line in base_lines:
+            pkg_spec = line.split(';', 1)[0].strip()
+            assert '==' in pkg_spec, f'Unpinned requirement in requirements.lock: {line}'
+
+        for fname in ('requirements.in', 'requirements.lock', 'requirements.txt'):
+            joined = '\n'.join(self._package_lines(fname)).lower()
+            assert 'psycopg' not in joined, f'psycopg must stay out of {fname}'
+
+    def test_postgres_lockfile_pins_psycopg(self):
+        pg_lines = self._package_lines('requirements-postgres.lock')
+        assert pg_lines, 'requirements-postgres.lock must not be empty'
+        names = set()
+        for line in pg_lines:
+            pkg_spec = line.split(';', 1)[0].strip()
+            assert '==' in pkg_spec, f'Unpinned requirement in requirements-postgres.lock: {line}'
+            names.add(pkg_spec.split('==', 1)[0].lower())
+        assert 'psycopg' in names
+        assert 'psycopg-binary' in names
