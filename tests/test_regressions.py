@@ -461,3 +461,120 @@ class TestDashboardRecentTransactions:
         assert 'Oldest-1' not in html
         assert 'Oldest-2' not in html
         assert html.index('Recent-7') < html.index('Recent-6') < html.index('Recent-5')
+
+
+class TestDashboardAndServiceWorker:
+    """Tests for dashboard asset 404 removal and sw.js fetch resilience."""
+
+    def test_dashboard_does_not_reference_missing_chart_css(self, auth_client):
+        resp = auth_client.get('/dashboard')
+        assert resp.status_code == 200
+        assert b'chart.umd.min.css' not in resp.data
+
+    def test_sw_js_every_fetch_branch_resolves_to_valid_response_when_fetch_rejects(
+        self, client
+    ):
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which('node')
+        if not node:
+            pytest.skip('Node.js not available to execute sw.js')
+
+        sw_resp = client.get('/sw.js')
+        assert sw_resp.status_code == 200
+        sw_code = sw_resp.data.decode('utf-8')
+
+        harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const swCode = fs.readFileSync(0, 'utf8');
+
+class FakeResponse {
+  constructor(body = '', init = {}) {
+    this.body = body;
+    this.status = init.status ?? 200;
+    this.statusText = init.statusText ?? 'OK';
+    this.ok = this.status >= 200 && this.status < 300;
+    this.headers = init.headers || {};
+  }
+  clone() { return new FakeResponse(this.body, { status: this.status, statusText: this.statusText, headers: this.headers }); }
+}
+
+const listeners = {};
+const cacheStore = new Map([['/offline', new FakeResponse('OFFLINE_PAGE', { status: 200 })]]);
+
+const context = {
+  URL,
+  Response: FakeResponse,
+  console: { log() {}, warn() {}, error() {} },
+  self: {
+    addEventListener(type, fn) { listeners[type] = fn; },
+    skipWaiting() {},
+    clients: { claim() {} },
+  },
+  caches: {
+    async open() { return { async addAll() {}, async put() {} }; },
+    async keys() { return []; },
+    async delete() { return true; },
+    async match(req) {
+      const key = typeof req === 'string' ? req : new URL(req.url).pathname;
+      return cacheStore.get(key);
+    },
+  },
+  fetch: async () => { throw new TypeError('Failed to fetch'); },
+};
+
+vm.runInNewContext(swCode, context);
+
+async function dispatchFetch(url, { mode = 'cors', destination = '', accept = '*/*' } = {}) {
+  let responded = null;
+  const event = {
+    request: {
+      url,
+      method: 'GET',
+      mode,
+      destination,
+      headers: { get(name) { return name.toLowerCase() === 'accept' ? accept : null; } },
+    },
+    respondWith(promise) { responded = promise; },
+  };
+  listeners.fetch(event);
+  const res = await responded;
+  if (!(res instanceof FakeResponse)) {
+    throw new Error(`Invalid non-Response returned for ${url}: ${String(res)}`);
+  }
+  return { status: res.status, body: res.body };
+}
+
+(async () => {
+  const results = {
+    staticMiss: await dispatchFetch('http://127.0.0.1/static/missing.css'),
+    navOffline: await dispatchFetch('http://127.0.0.1/dashboard', { mode: 'navigate', destination: 'document', accept: 'text/html' }),
+    nonNavDashboard: await dispatchFetch('http://127.0.0.1/dashboard', { mode: 'cors', accept: '*/*' }),
+    manifestMiss: await dispatchFetch('http://127.0.0.1/manifest.json', { mode: 'cors', accept: '*/*' }),
+  };
+  cacheStore.clear();
+  results.navOfflineNoCache = await dispatchFetch('http://127.0.0.1/dashboard', { mode: 'navigate', destination: 'document', accept: 'text/html' });
+  console.log(JSON.stringify(results));
+})().catch((err) => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(1);
+});
+"""
+        proc = subprocess.run(
+            [node, '-e', harness],
+            input=sw_code,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert proc.returncode == 0, f"sw.js rejected under offline fetch:\n{proc.stderr}"
+        results = json.loads(proc.stdout)
+        assert results['staticMiss']['status'] >= 400
+        assert results['navOffline']['body'] == 'OFFLINE_PAGE'
+        assert results['nonNavDashboard']['status'] >= 400
+        assert results['manifestMiss']['status'] >= 400
+        assert results['navOfflineNoCache']['status'] == 503
+
