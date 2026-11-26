@@ -312,7 +312,7 @@
                     </tr>
                 </thead>
                 <tbody>
-                    {% for expense in expenses[-5:]|reverse %}
+                    {% for expense in expenses[:5] %}
                     <tr>
                         <td class="text-secondary small">{{ expense[0] }}</td>
                         <td>

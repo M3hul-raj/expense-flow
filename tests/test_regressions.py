@@ -407,5 +407,43 @@ class TestPdfExportEscaping:
         assert resp.data.startswith(b'%PDF-')
 
 
+class TestDashboardRecentTransactions:
+    """Tests ensuring /dashboard shows the 5 newest transactions, not the 5 oldest."""
+
+    def test_dashboard_displays_five_newest_expenses(self, auth_client, user):
+        from models import Expense
+
+        entries = [
+            ('2026-01-01', 'Oldest-1'),
+            ('2026-01-02', 'Oldest-2'),
+            ('2026-01-03', 'Recent-3'),
+            ('2026-01-04', 'Recent-4'),
+            ('2026-01-05', 'Recent-5'),
+            ('2026-01-07', 'Recent-6'),
+            ('2026-01-07', 'Recent-7'),
+        ]
+        for dt, desc in entries:
+            db.session.add(Expense(
+                user_id=user.id,
+                date=dt,
+                category='Food',
+                amount=50.0,
+                description=desc,
+                payment_method='UPI',
+            ))
+        db.session.commit()
+
+        resp = auth_client.get('/dashboard')
+        assert resp.status_code == 200
+        html = resp.data.decode('utf-8')
+
+        for label in ['Recent-7', 'Recent-6', 'Recent-5', 'Recent-4', 'Recent-3']:
+            assert label in html
+        assert 'Oldest-1' not in html
+        assert 'Oldest-2' not in html
+        assert html.index('Recent-7') < html.index('Recent-6') < html.index('Recent-5')
+
+
+
 
 

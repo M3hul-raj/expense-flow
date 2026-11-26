@@ -93,7 +93,10 @@ def get_budget_history(user_id, months=6):
 
 
 def get_user_expenses_sorted(user_id):
-    """Return all expenses for a user sorted newest-first by date."""
-    expenses = Expense.query.filter_by(user_id=user_id).all()
-    expenses.sort(key=lambda x: x.date, reverse=True)
-    return expenses
+    """Return all expenses for a user sorted newest-first by date and id."""
+    return (
+        Expense.query
+        .filter_by(user_id=user_id)
+        .order_by(Expense.date.desc(), Expense.id.desc())
+        .all()
+    )
