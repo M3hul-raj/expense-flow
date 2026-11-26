@@ -16,7 +16,7 @@ from models import db, User, Budget
 from utils import (
     is_logged_in, get_current_year_month, get_user_budget,
     MAX_BUDGET_RUPEES, parse_rupees_to_paise, paise_to_rupees_input,
-    format_paise_as_rupees,
+    format_paise_as_rupees, commit_session,
 )
 
 logger = logging.getLogger('expenseflow')
@@ -89,7 +89,10 @@ def set_budget():
         else:
             flash(f'Budget for {month}/{year} updated successfully!', 'success')
 
-        db.session.commit()
+        if commit_session() is not None:
+            logger.exception('Database error saving budget: user=%s', user_id)
+            flash('Unable to save budget right now. Please try again.', 'error')
+            return redirect(url_for('budget.set_budget'))
         return redirect(url_for('auth.dashboard'))
 
     return render_template('set_budget.html',

@@ -17,13 +17,19 @@ db = SQLAlchemy(metadata=MetaData(naming_convention=NAMING_CONVENTION))
 class User(db.Model):
     """Stores registered user accounts."""
     id            = db.Column(db.Integer, primary_key=True)
-    username      = db.Column(db.String(80),  unique=True, nullable=False, index=True)
-    email         = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    username      = db.Column(db.String(80), nullable=False)
+    email         = db.Column(db.String(120), nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
     recurring_budget_paise = db.Column(db.BigInteger, nullable=True)
-    registration_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
-    avatar        = db.Column(db.String(50), default='avatar_1', server_default=db.text("'avatar_1'"))
+    registration_date = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    avatar        = db.Column(db.String(50), nullable=False, default='avatar_1', server_default=db.text("'avatar_1'"))
     display_name  = db.Column(db.String(80))
+
+    __table_args__ = (
+        db.CheckConstraint('recurring_budget_paise > 0', name='recurring_budget_paise_positive'),
+        db.Index('ix_user_username_lower', db.func.lower(username), unique=True),
+        db.Index('ix_user_email_lower', db.func.lower(email), unique=True),
+    )
 
     expenses = db.relationship('Expense', backref='user', lazy=True, cascade="all, delete-orphan")
     budgets  = db.relationship('Budget',  backref='user', lazy=True, cascade="all, delete-orphan")
@@ -41,27 +47,29 @@ class Expense(db.Model):
     """Stores individual expense records for a user."""
     id             = db.Column(db.Integer, primary_key=True)
     # Indexed — most queries filter by user_id and/or date
-    user_id        = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    user_id        = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False, index=True)
     date           = db.Column(db.Date, nullable=False, index=True)
     category       = db.Column(db.String(50), nullable=False)
     amount_paise   = db.Column(db.BigInteger, nullable=False)
     description    = db.Column(db.String(255))
-    payment_method = db.Column(db.String(50), default='Cash')
-    created_at     = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    payment_method = db.Column(db.String(50), nullable=False, default='Cash')
+    created_at     = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
     # Composite index covering WHERE user_id = ? ORDER BY date DESC, id DESC via backward scan
     __table_args__ = (
+        db.CheckConstraint('amount_paise > 0', name='amount_paise_positive'),
         db.Index('idx_expense_user_date_id', 'user_id', 'date', 'id'),
     )
 
 
 class Budget(db.Model):
     """Stores monthly budget targets per user."""
-    id         = db.Column(db.Integer, primary_key=True)
-    user_id    = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    id           = db.Column(db.Integer, primary_key=True)
+    user_id      = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False, index=True)
     year_month   = db.Column(db.String(7), nullable=False)  # YYYY-MM
     amount_paise = db.Column(db.BigInteger, nullable=False)
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'year_month', name='unique_user_month_budget'),
+        db.CheckConstraint('amount_paise > 0', name='amount_paise_positive'),
     )

@@ -11,6 +11,7 @@ import re as _re
 from dateutil.relativedelta import relativedelta
 from flask import session
 from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
 from models import db, User, Expense, Budget
 
 # ── Monetary constants & helpers (integer paise internally) ──────────────────
@@ -87,6 +88,16 @@ def format_paise_as_rupees(paise: int, decimals: int = 2) -> str:
         return f"{sign}₹{quantized:,}"
     quantized = abs_dec.quantize(Decimal('1.' + ('0' * decimals)), rounding=ROUND_HALF_UP)
     return f"{sign}₹{quantized:,.{decimals}f}"
+
+
+def commit_session():
+    """Commit the active DB session, rolling back cleanly on any SQLAlchemyError."""
+    try:
+        db.session.commit()
+        return None
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        return exc
 
 
 def is_logged_in():

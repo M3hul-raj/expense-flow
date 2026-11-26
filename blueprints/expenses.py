@@ -19,6 +19,7 @@ from utils import (
     is_logged_in, get_current_year_month, get_user_budget,
     get_monthly_spending, get_user_expenses_sorted, TIPS,
     MAX_EXPENSE_RUPEES, parse_rupees_to_paise, paise_to_rupees_input,
+    commit_session,
 )
 
 logger = logging.getLogger('expenseflow')
@@ -110,7 +111,10 @@ def add_expense():
             payment_method=payment_method
         )
         db.session.add(new_expense)
-        db.session.commit()
+        if commit_session() is not None:
+            logger.exception('Database error adding expense: user=%s', user_id)
+            flash('Unable to save expense right now. Please try again.', 'error')
+            return redirect(url_for('expenses.add_expense'))
         logger.info('Expense added: user=%s amount_paise=%d category=%s', user_id, amount_paise, category)
 
         flash('Expense added successfully!', 'success')
@@ -248,7 +252,10 @@ def edit_expense(expense_id):
         expense_to_edit.description = description
         expense_to_edit.payment_method = payment_method
 
-        db.session.commit()
+        if commit_session() is not None:
+            logger.exception('Database error editing expense: user=%s id=%s', user_id, expense_to_edit.id)
+            flash('Unable to update expense right now. Please try again.', 'error')
+            return redirect(url_for('expenses.edit_expense', expense_id=expense_id))
         logger.info('Expense edited: user=%s id=%s', user_id, expense_to_edit.id)
 
         flash('Expense updated successfully!', 'success')
@@ -283,7 +290,10 @@ def delete_expense(expense_id):
     expense_to_delete = Expense.query.filter_by(id=expense_id, user_id=user_id).first_or_404()
 
     db.session.delete(expense_to_delete)
-    db.session.commit()
+    if commit_session() is not None:
+        logger.exception('Database error deleting expense: user=%s id=%s', user_id, expense_to_delete.id)
+        flash('Unable to delete expense right now. Please try again.', 'error')
+        return redirect(url_for('expenses.view_expense'))
     logger.info('Expense deleted: user=%s id=%s', user_id, expense_to_delete.id)
     flash('Expense deleted successfully!', 'success')
 
