@@ -77,7 +77,7 @@
                     <div class="kpi-label">vs Last Month</div>
                     <div class="text-secondary" style="font-size:0.72rem;">
                         {% if mom_direction == 'up' %}More than {% elif mom_direction == 'down' %}Less than {% endif %}
-                        ₹{{ "%.0f"|format(total_prev_month) }}
+                        {{ total_prev_month | currency(0) }}
                     </div>
                 </div>
             </div>
@@ -89,7 +89,7 @@
                     <i class="fas fa-trophy"></i>
                 </div>
                 <div>
-                    <div class="kpi-value">{% if biggest_expense %}₹{{ "%.0f"|format(biggest_expense.amount) }}{% else %}—{% endif %}</div>
+                    <div class="kpi-value">{% if biggest_expense %}{{ biggest_expense.amount_paise | currency(0) }}{% else %}—{% endif %}</div>
                     <div class="kpi-label">Biggest Expense</div>
                     <div class="text-secondary" style="font-size:0.72rem;">
                         {% if biggest_expense %}{{ biggest_expense.category }} · {{ biggest_expense.date }}{% else %}No data{% endif %}
@@ -104,9 +104,9 @@
                     <i class="fas fa-chart-line"></i>
                 </div>
                 <div>
-                    <div class="kpi-value">₹{{ "%.0f"|format(avg_daily) }}</div>
+                    <div class="kpi-value">{{ avg_daily | currency(0) }}</div>
                     <div class="kpi-label">Daily Average</div>
-                    <div class="text-secondary" style="font-size:0.72rem;">₹{{ "%.0f"|format(total_this_month) }} total</div>
+                    <div class="text-secondary" style="font-size:0.72rem;">{{ total_this_month | currency(0) }} total</div>
                 </div>
             </div>
         </div>
@@ -132,14 +132,14 @@
             <i class="fas fa-{% if mom_direction == 'up' %}exclamation-circle text-danger{% elif mom_direction == 'down' %}check-circle text-success{% else %}minus-circle text-secondary{% endif %} fs-5 mt-1"></i>
             <div>
                 <p class="fw-bold mb-1" style="color:var(--text-primary);">
-                    You spent <strong>₹{{ "%.0f"|format(total_this_month) }}</strong> in {{ selected_month_label }}
+                    You spent <strong>{{ total_this_month | currency(0) }}</strong> in {{ selected_month_label }}
                     {% if mom_direction == 'up' %} — <span class="text-danger">{{ "%.1f"|format(mom_change_pct) }}% more</span> than last month
                     {% elif mom_direction == 'down' %} — <span class="text-success">{{ "%.1f"|format(mom_change_pct|abs) }}% less</span> than last month
                     {% else %} — same as last month{% endif %}.
                 </p>
                 {% if biggest_increase_cat and biggest_increase_amt > 0 %}
                 <p class="text-secondary small mb-0">
-                    Biggest increase: <strong>{{ biggest_increase_cat }}</strong> (+₹{{ "%.0f"|format(biggest_increase_amt) }} vs previous month)
+                    Biggest increase: <strong>{{ biggest_increase_cat }}</strong> (+{{ biggest_increase_amt | currency(0) }} vs previous month)
                 </p>
                 {% endif %}
             </div>
@@ -168,7 +168,7 @@
                             <div class="cat-bar-fill" style="width:{{ cat_percentages[i] }}%;background:{{ ['#4F46E5','#7C3AED','#0EA5E9','#10B981','#F59E0B','#F43F5E','#64748B','#14B8A6'][i % 8] }};"></div>
                         </div>
                         <span class="small fw-bold" style="min-width:40px;text-align:right;">{{ cat_percentages[i] }}%</span>
-                        <span class="small text-secondary" style="min-width:70px;text-align:right;">₹{{ "%.0f"|format(cat_amounts[i]) }}</span>
+                        <span class="small text-secondary" style="min-width:70px;text-align:right;">{{ cat_totals_sorted[i][1] | currency(0) }}</span>
                     </div>
                     {% endfor %}
                 </div>
@@ -196,7 +196,7 @@
             <i class="fas fa-calendar-day text-primary"></i> Daily Spending — {{ selected_month_label }}
             {% if peak_day %}
             <span class="ms-2 small text-secondary fw-normal">
-                Peak: Day {{ peak_day }} (₹{{ "%.0f"|format(peak_day_amount) }})
+                Peak: Day {{ peak_day }} ({{ peak_day_amount | currency(0) }})
             </span>
             {% endif %}
         </div>
@@ -253,7 +253,7 @@
                                     <span style="display:inline-flex;align-items:center;padding:.2em .65em;font-size:.76rem;font-weight:600;border-radius:9999px;background:var(--primary-light);color:var(--primary);">{{ e.category }}</span>
                                 </td>
                                 <td class="text-secondary small">{{ (e.description or '—')[:40] }}</td>
-                                <td class="text-end fw-bold" style="color:var(--danger);">₹{{ "%.2f"|format(e.amount) }}</td>
+                                <td class="text-end fw-bold" style="color:var(--danger);">{{ e.amount_paise | currency }}</td>
                             </tr>
                             {% endfor %}
                         </tbody>
@@ -302,9 +302,9 @@
                     <div class="cal-day {% if cell.intensity >= 0.95 %}peak{% endif %}"
                          style="background:rgba(79,70,229,{{ [cell.intensity * 0.85, 0.05]|max }});
                                 color:{% if cell.intensity > 0.5 %}white{% else %}var(--text-primary){% endif %};"
-                         title="Day {{ cell.day }}: ₹{{ '%.0f'|format(cell.amount) }}">
+                         title="Day {{ cell.day }}: {{ cell.amount | currency(0) }}">
                         <span class="cal-num">{{ cell.day }}</span>
-                        <span class="cal-amt">₹{{ "%.0f"|format(cell.amount) }}</span>
+                        <span class="cal-amt">{{ cell.amount | currency(0) }}</span>
                     </div>
                     {% endif %}
                 {% endfor %}

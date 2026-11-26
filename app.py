@@ -68,13 +68,16 @@ def create_app(config_name=None, database_uri=None):
 
     # ── Jinja filters ─────────────────────────────────────────────────────
     @app.template_filter('currency')
-    def format_currency(value):
-        """Formats a float/int into Indian Rupee format."""
+    def format_currency(value, decimals=2):
+        """Format an integer paise amount into Indian Rupee format."""
+        from utils import format_paise_as_rupees
+
+        if value is None or isinstance(value, bool):
+            return format_paise_as_rupees(0, decimals=decimals)
         try:
-            value = float(value)
-            return f"₹{value:,.2f}"
+            return format_paise_as_rupees(int(value), decimals=decimals)
         except (ValueError, TypeError):
-            return "₹0.00"
+            return format_paise_as_rupees(0, decimals=decimals)
 
     # ── Config ────────────────────────────────────────────────────────────
     app.secret_key = secret_key

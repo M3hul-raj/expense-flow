@@ -9,6 +9,7 @@ import re as _re
 import logging
 import random
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from flask import (
     Blueprint, render_template, request, redirect,
     session, flash, url_for,
@@ -17,6 +18,7 @@ from models import db, Expense
 from utils import (
     is_logged_in, get_current_year_month, get_user_budget,
     get_monthly_spending, get_user_expenses_sorted, TIPS,
+    MAX_EXPENSE_RUPEES, parse_rupees_to_paise, paise_to_rupees_input,
 )
 
 logger = logging.getLogger('expenseflow')
@@ -35,6 +37,18 @@ def _parse_expense_date(raw_date):
     if parsed > datetime.now().date():
         return None, 'Expense date cannot be in the future.'
     return parsed, None
+
+def _parse_expense_amount(amount_raw, *, require_non_empty=False):
+    """Parse decimal rupee input into paise and return (paise, flash_msg, flash_cat)."""
+    amount_paise, err = parse_rupees_to_paise(amount_raw, max_rupees=MAX_EXPENSE_RUPEES)
+    if err is None:
+        return amount_paise, None, None
+    if err == 'empty' and require_non_empty:
+        return None, 'Amount is required.', 'error'
+    if err == 'too_large':
+        return None, 'Amount seems too large. Please check your entry.', 'warning'
+    return None, 'Please enter a valid positive amount.', 'error'
+
 
 # ── Shared validation sets ────────────────────────────────────────────────────
 VALID_CATEGORIES = {
@@ -75,18 +89,9 @@ def add_expense():
         if category not in VALID_CATEGORIES:
             flash('Please select a valid category.', 'error')
             return redirect(url_for('expenses.add_expense'))
-        if not amount_raw:
-            flash('Amount is required.', 'error')
-            return redirect(url_for('expenses.add_expense'))
-        try:
-            amount = float(amount_raw)
-            if amount <= 0:
-                raise ValueError
-            if amount > 10_000_000:
-                flash('Amount seems too large. Please check your entry.', 'warning')
-                return redirect(url_for('expenses.add_expense'))
-        except ValueError:
-            flash('Please enter a valid positive amount.', 'error')
+        amount_paise, amt_msg, amt_cat = _parse_expense_amount(amount_raw, require_non_empty=True)
+        if amt_msg:
+            flash(amt_msg, amt_cat)
             return redirect(url_for('expenses.add_expense'))
         if payment_method not in VALID_METHODS:
             flash('Please select a valid payment method.', 'error')
@@ -100,13 +105,13 @@ def add_expense():
             user_id=user_id,
             date=expense_date,
             category=category,
-            amount=amount,
+            amount_paise=amount_paise,
             description=description,
             payment_method=payment_method
         )
         db.session.add(new_expense)
         db.session.commit()
-        logger.info('Expense added: user=%s amount=%.2f category=%s', user_id, amount, category)
+        logger.info('Expense added: user=%s amount_paise=%d category=%s', user_id, amount_paise, category)
 
         flash('Expense added successfully!', 'success')
         return redirect(url_for('auth.dashboard'))
@@ -146,25 +151,33 @@ def view_expense():
     expenses_obj = get_user_expenses_sorted(user_id)
 
     expenses = []
-    total_spent = 0.0
+    total_spent = 0
     category_totals = {}
     monthly_totals = {}
     payment_method_totals = {}
 
     for e in expenses_obj:
-        expenses.append([e.date.isoformat(), e.category, str(e.amount), e.description or '', e.payment_method, e.id])
+        expenses.append([
+            e.date.isoformat(),
+            e.category,
+            paise_to_rupees_input(e.amount_paise),
+            e.description or '',
+            e.payment_method,
+            e.id,
+            e.amount_paise,
+        ])
 
-        total_spent += e.amount
-        category_totals[e.category] = category_totals.get(e.category, 0) + e.amount
-        payment_method_totals[e.payment_method] = payment_method_totals.get(e.payment_method, 0) + e.amount
+        total_spent += e.amount_paise
+        category_totals[e.category] = category_totals.get(e.category, 0) + e.amount_paise
+        payment_method_totals[e.payment_method] = payment_method_totals.get(e.payment_method, 0) + e.amount_paise
 
         month_key = e.date.strftime('%Y-%m')
-        monthly_totals[month_key] = monthly_totals.get(month_key, 0) + e.amount
+        monthly_totals[month_key] = monthly_totals.get(month_key, 0) + e.amount_paise
 
     if expenses_obj:
         first_date = min(e.date for e in expenses_obj)
         days_active = max(1, (datetime.now().date() - first_date).days + 1)
-        avg_daily_spend = total_spent / days_active
+        avg_daily_spend = int((Decimal(total_spent) / Decimal(days_active)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
     else:
         avg_daily_spend = 0
     top_category = max(category_totals, key=category_totals.get) if category_totals else 'None'
@@ -220,12 +233,9 @@ def edit_expense(expense_id):
         if category not in VALID_CATEGORIES:
             flash('Please select a valid category.', 'error')
             return redirect(url_for('expenses.edit_expense', expense_id=expense_id))
-        try:
-            amount = float(amount_raw)
-            if amount <= 0:
-                raise ValueError
-        except (ValueError, TypeError):
-            flash('Please enter a valid positive amount.', 'error')
+        amount_paise, amt_msg, amt_cat = _parse_expense_amount(amount_raw)
+        if amt_msg:
+            flash(amt_msg, amt_cat)
             return redirect(url_for('expenses.edit_expense', expense_id=expense_id))
         if payment_method not in VALID_METHODS:
             flash('Please select a valid payment method.', 'error')
@@ -234,7 +244,7 @@ def edit_expense(expense_id):
 
         expense_to_edit.date = expense_date
         expense_to_edit.category = category
-        expense_to_edit.amount = amount
+        expense_to_edit.amount_paise = amount_paise
         expense_to_edit.description = description
         expense_to_edit.payment_method = payment_method
 
@@ -244,7 +254,13 @@ def edit_expense(expense_id):
         flash('Expense updated successfully!', 'success')
         return redirect(url_for('expenses.view_expense'))
 
-    expense_list = [expense_to_edit.date.isoformat(), expense_to_edit.category, str(expense_to_edit.amount), expense_to_edit.description, expense_to_edit.payment_method]
+    expense_list = [
+        expense_to_edit.date.isoformat(),
+        expense_to_edit.category,
+        paise_to_rupees_input(expense_to_edit.amount_paise),
+        expense_to_edit.description,
+        expense_to_edit.payment_method,
+    ]
     return render_template('edit_expense.html', expense=expense_list, expense_id=expense_id)
 
 

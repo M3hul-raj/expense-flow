@@ -339,7 +339,9 @@ class TestSchemaReconciliation:
                 assert conn.execute(sa.text('SELECT COUNT(*) FROM "user"')).scalar_one() == 1
                 assert conn.execute(sa.text('SELECT COUNT(*) FROM budget')).scalar_one() == 1
                 assert conn.execute(sa.text('SELECT COUNT(*) FROM expense')).scalar_one() == 1
-                assert conn.execute(sa.text('SELECT amount FROM expense WHERE id = 1')).scalar_one() == 149.5
+                assert conn.execute(sa.text('SELECT amount_paise FROM expense WHERE id = 1')).scalar_one() == 14950
+                assert conn.execute(sa.text('SELECT amount_paise FROM budget WHERE id = 1')).scalar_one() == 500000
+                assert conn.execute(sa.text('SELECT recurring_budget_paise FROM "user" WHERE id = 1')).scalar_one() == 300000
         finally:
             engine.dispose()
 
@@ -558,12 +560,6 @@ class TestExpenseOrderingIndex:
             assert not indexes_up['idx_expense_user_date_id']['unique']
             assert {'ix_expense_user_id', 'ix_expense_date'}.issubset(indexes_up.keys())
 
-            with engine.connect() as conn:
-                ctx = MigrationContext.configure(
-                    conn, opts={'compare_type': True, 'compare_server_default': True}
-                )
-                assert compare_metadata(ctx, db.metadata) == []
-
             command.downgrade(cfg, '0003_expense_date_type')
             insp_down = sa.inspect(engine)
             indexes_down = {i['name']: i for i in insp_down.get_indexes('expense')}
@@ -572,6 +568,12 @@ class TestExpenseOrderingIndex:
             assert indexes_down['idx_expense_user_date']['column_names'] == ['user_id', 'date']
 
             command.upgrade(cfg, '0004_expense_ordering_index')
+            command.upgrade(cfg, 'head')
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                assert compare_metadata(ctx, db.metadata) == []
         finally:
             if is_postgres:
                 with engine.begin() as conn:
@@ -611,7 +613,7 @@ class TestExpenseOrderingIndex:
                         else (base_day + timedelta(days=(i // 40))).isoformat()
                     ),
                     'category': 'Food',
-                    'amount': 50.0 + (i % 10),
+                    'amount_paise': 5000 + ((i % 10) * 100),
                     'description': f'row {i}',
                     'payment_method': 'UPI',
                 }
@@ -628,20 +630,20 @@ class TestExpenseOrderingIndex:
                 )
                 conn.execute(
                     sa.text(
-                        """INSERT INTO expense (user_id, date, category, amount, description, payment_method, created_at)
-                           VALUES (:user_id, :date, :category, :amount, :description, :payment_method, CURRENT_TIMESTAMP)"""
+                        """INSERT INTO expense (user_id, date, category, amount_paise, description, payment_method, created_at)
+                           VALUES (:user_id, :date, :category, :amount_paise, :description, :payment_method, CURRENT_TIMESTAMP)"""
                     ),
                     exp_rows,
                 )
                 conn.execute(sa.text('ANALYZE expense'))
 
             query_full = (
-                'SELECT id, user_id, date, category, amount, description, payment_method, created_at '
+                'SELECT id, user_id, date, category, amount_paise, description, payment_method, created_at '
                 'FROM expense WHERE user_id = :uid ORDER BY date DESC, id DESC'
             )
             query_limit = f'{query_full} LIMIT 5'
             query_month_limit = (
-                'SELECT id, user_id, date, category, amount, description, payment_method, created_at '
+                'SELECT id, user_id, date, category, amount_paise, description, payment_method, created_at '
                 'FROM expense WHERE user_id = :uid AND date >= :start_d AND date < :end_d '
                 'ORDER BY date DESC, id DESC LIMIT 10'
             )
@@ -679,3 +681,332 @@ class TestExpenseOrderingIndex:
                 with engine.begin() as conn:
                     conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
             engine.dispose()
+
+
+class TestMoneyPaiseMigration:
+    """Tests for 0005_money_paise conversion, paise conservation, downgrade, and legacy sqlite_autoindex_* user rebuild."""
+
+    def test_0005_converts_money_to_bigint_paise_conserves_totals_and_downgrades(self, tmp_path):
+        from datetime import date as py_date
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+        from scripts.verify_migration import audit_database, compare_reports
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'paise_mig.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, '0004_expense_ordering_index')
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, recurring_budget, registration_date, avatar)
+                       VALUES
+                       (1, 'paise1', 'paise1@example.com', 'h1', 3500.75, CURRENT_TIMESTAMP, 'avatar_1'),
+                       (2, 'paise2', 'paise2@example.com', 'h2', NULL, CURRENT_TIMESTAMP, 'avatar_2')"""
+                ))
+                conn.execute(sa.text(
+                    """INSERT INTO expense (id, user_id, date, category, amount, payment_method, created_at)
+                       VALUES
+                       (1, 1, :d1, 'Food', :a1, 'UPI', CURRENT_TIMESTAMP),
+                       (2, 1, :d2, 'Food', :a2, 'Cash', CURRENT_TIMESTAMP),
+                       (3, 1, :d2, 'Shopping', :a3, 'Card', CURRENT_TIMESTAMP),
+                       (4, 2, :d3, 'Bills', :a4, 'NetBanking', CURRENT_TIMESTAMP)"""
+                ), {
+                    'd1': py_date(2024, 2, 29) if is_postgres else '2024-02-29',
+                    'd2': py_date(2026, 1, 1) if is_postgres else '2026-01-01',
+                    'd3': py_date(2026, 12, 31) if is_postgres else '2026-12-31',
+                    'a1': 0.1 + 0.2,
+                    'a2': 1.005,
+                    'a3': 19.99,
+                    'a4': 9999999.99,
+                })
+                conn.execute(sa.text(
+                    """INSERT INTO budget (id, user_id, year_month, amount)
+                       VALUES
+                       (1, 1, '2026-01', 10000.50),
+                       (2, 2, '2026-12', 100000000.0)"""
+                ))
+                if is_postgres:
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('"user"', 'id'), 2)"""))
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('expense', 'id'), 4)"""))
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('budget', 'id'), 2)"""))
+
+            before = audit_database(uri)
+            assert before['total_expense_paise'] == 30 + 101 + 1999 + 999_999_999
+            assert before['total_budget_paise'] == 1_000_050 + 10_000_000_000
+            assert before['total_recurring_budget_paise'] == 350_075
+
+            command.upgrade(cfg, '0005_money_paise')
+            insp = sa.inspect(engine)
+
+            user_cols = {c['name']: c for c in insp.get_columns('user')}
+            exp_cols = {c['name']: c for c in insp.get_columns('expense')}
+            bud_cols = {c['name']: c for c in insp.get_columns('budget')}
+
+            assert 'recurring_budget' not in user_cols
+            assert isinstance(user_cols['recurring_budget_paise']['type'], sa.BigInteger)
+            assert user_cols['recurring_budget_paise']['nullable'] is True
+
+            assert 'amount' not in exp_cols
+            assert isinstance(exp_cols['amount_paise']['type'], sa.BigInteger)
+            assert exp_cols['amount_paise']['nullable'] is False
+            assert isinstance(exp_cols['date']['type'], sa.Date)
+
+            assert 'amount' not in bud_cols
+            assert isinstance(bud_cols['amount_paise']['type'], sa.BigInteger)
+            assert bud_cols['amount_paise']['nullable'] is False
+
+            assert {'ix_expense_user_id', 'ix_expense_date', 'idx_expense_user_date_id'}.issubset(
+                {i['name'] for i in insp.get_indexes('expense')}
+            )
+            assert insp.get_foreign_keys('expense')[0]['referred_table'] == 'user'
+            assert insp.get_foreign_keys('budget')[0]['referred_table'] == 'user'
+
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                assert compare_metadata(ctx, db.metadata) == []
+                assert conn.execute(sa.text('SELECT amount_paise FROM expense ORDER BY id ASC')).scalars().all() == [
+                    30, 101, 1999, 999_999_999
+                ]
+                assert conn.execute(sa.text('SELECT amount_paise FROM budget ORDER BY id ASC')).scalars().all() == [
+                    1_000_050, 10_000_000_000
+                ]
+                assert conn.execute(sa.text('SELECT recurring_budget_paise FROM "user" ORDER BY id ASC')).scalars().all() == [
+                    350_075, None
+                ]
+                if not is_postgres:
+                    assert conn.execute(sa.text('SELECT typeof(date) FROM expense WHERE id = 1')).scalar_one() == 'text'
+                    assert conn.execute(sa.text('SELECT date FROM expense WHERE id = 1')).scalar_one() == '2024-02-29'
+
+            after_up = audit_database(uri)
+            assert compare_reports(before, after_up) == []
+
+            command.downgrade(cfg, '0004_expense_ordering_index')
+            insp_down = sa.inspect(engine)
+            assert 'amount' in {c['name'] for c in insp_down.get_columns('expense')}
+            assert 'amount_paise' not in {c['name'] for c in insp_down.get_columns('expense')}
+            assert 'amount' in {c['name'] for c in insp_down.get_columns('budget')}
+            assert 'recurring_budget' in {c['name'] for c in insp_down.get_columns('user')}
+
+            after_down = audit_database(uri)
+            assert compare_reports(before, after_down) == []
+
+            command.upgrade(cfg, '0005_money_paise')
+            assert compare_reports(before, audit_database(uri)) == []
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+            engine.dispose()
+
+    def test_0005_aborts_when_non_positive_or_non_finite_amount_present(self, tmp_path):
+        db_file = tmp_path / 'bad_amt_abort.db'
+        uri = f"sqlite:///{db_file.as_posix()}"
+        cfg = _alembic_config(uri)
+        command.upgrade(cfg, '0004_expense_ordering_index')
+
+        engine = sa.create_engine(uri)
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                       VALUES (1, 'badamt', 'badamt@example.com', 'h', CURRENT_TIMESTAMP, 'avatar_1')"""
+                ))
+                conn.execute(sa.text(
+                    """INSERT INTO expense (id, user_id, date, category, amount, payment_method, created_at)
+                       VALUES (1, 1, '2026-07-09', 'Food', 0.0, 'Cash', CURRENT_TIMESTAMP)"""
+                ))
+
+            with pytest.raises(ValueError, match='invalid'):
+                command.upgrade(cfg, '0005_money_paise')
+
+            with engine.connect() as conn:
+                ver = conn.execute(sa.text('SELECT version_num FROM alembic_version')).scalar_one()
+                assert ver == '0004_expense_ordering_index'
+                assert 'amount' in {c['name'] for c in sa.inspect(conn).get_columns('expense')}
+        finally:
+            engine.dispose()
+
+    def test_0005_legacy_stage1a_sqlite_autoindex_user_batch_alter_compatibility(self, tmp_path):
+        """
+        Upgrading a legacy Stage-1A SQLite DB with sqlite_autoindex_* UNIQUE constraints
+        (both table-level UNIQUE and inline column UNIQUE, with or without avatar default)
+        through 0005 batch_alter_table('user') must preserve uniqueness, FKs, and paise totals.
+        """
+        from scripts.verify_migration import audit_database, compare_reports
+
+        # Case 1: Table-level UNIQUE(username), UNIQUE(email) -> sqlite_autoindex_user_1/2
+        db1 = tmp_path / 'legacy_autoindex_table_uq.db'
+        conn1 = sqlite3.connect(db1)
+        try:
+            conn1.executescript(
+                """
+                CREATE TABLE user (
+                    id INTEGER NOT NULL,
+                    username VARCHAR(80) NOT NULL,
+                    email VARCHAR(120) NOT NULL,
+                    password_hash VARCHAR(256) NOT NULL,
+                    recurring_budget FLOAT,
+                    registration_date DATETIME,
+                    avatar VARCHAR(50),
+                    display_name VARCHAR(80),
+                    PRIMARY KEY (id),
+                    UNIQUE (username),
+                    UNIQUE (email)
+                );
+                CREATE TABLE expense (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user(id),
+                    date VARCHAR(10) NOT NULL,
+                    category VARCHAR(50) NOT NULL,
+                    amount FLOAT NOT NULL,
+                    description VARCHAR(255),
+                    payment_method VARCHAR(50),
+                    created_at DATETIME
+                );
+                CREATE TABLE budget (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user(id),
+                    year_month VARCHAR(7) NOT NULL,
+                    amount FLOAT NOT NULL,
+                    CONSTRAINT unique_user_month_budget UNIQUE (user_id, year_month)
+                );
+                INSERT INTO user (id, username, email, password_hash, recurring_budget, registration_date, avatar)
+                VALUES (1, 'Alice', 'alice@example.com', 'h1', 4250.5, '2026-01-01 00:00:00', 'avatar_1');
+                INSERT INTO expense (id, user_id, date, category, amount, payment_method, created_at)
+                VALUES (1, 1, '2024-02-29', 'Food', 149.5, 'UPI', '2024-02-29 10:00:00');
+                INSERT INTO budget (id, user_id, year_month, amount)
+                VALUES (1, 1, '2026-11', 5000.0);
+                """
+            )
+            conn1.commit()
+        finally:
+            conn1.close()
+
+        uri1 = f"sqlite:///{db1.as_posix()}"
+        cfg1 = _alembic_config(uri1)
+        before1 = audit_database(uri1)
+
+        command.stamp(cfg1, '0001_baseline')
+        command.upgrade(cfg1, 'head')
+
+        eng1 = sa.create_engine(uri1)
+        try:
+            insp1 = sa.inspect(eng1)
+            assert insp1.get_indexes('user') == []
+            assert 'recurring_budget_paise' in {c['name'] for c in insp1.get_columns('user')}
+            assert 'amount_paise' in {c['name'] for c in insp1.get_columns('expense')}
+            assert 'amount_paise' in {c['name'] for c in insp1.get_columns('budget')}
+            assert {tuple(u['column_names']) for u in insp1.get_unique_constraints('user')} == {
+                ('username',),
+                ('email',),
+            }
+            assert TestSchemaReconciliation._unexplained_diffs(eng1) == []
+            assert compare_reports(before1, audit_database(uri1)) == []
+
+            with eng1.connect() as sa_conn:
+                autoindexes = [
+                    r[0]
+                    for r in sa_conn.execute(
+                        sa.text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='user' AND name LIKE 'sqlite_autoindex_%'")
+                    )
+                ]
+                assert len(autoindexes) == 2
+                assert list(sa_conn.execute(sa.text('PRAGMA foreign_key_check'))) == []
+
+            # Duplicate username / email must still fail via preserved UNIQUE autoindexes
+            with pytest.raises(sa.exc.IntegrityError):
+                with eng1.begin() as sa_conn:
+                    sa_conn.execute(sa.text(
+                        """INSERT INTO "user" (username, email, password_hash)
+                           VALUES ('Alice', 'unique2@example.com', 'h2')"""
+                    ))
+            with pytest.raises(sa.exc.IntegrityError):
+                with eng1.begin() as sa_conn:
+                    sa_conn.execute(sa.text(
+                        """INSERT INTO "user" (username, email, password_hash)
+                           VALUES ('UniqueUser2', 'alice@example.com', 'h2')"""
+                    ))
+
+            command.downgrade(cfg1, '0004_expense_ordering_index')
+            assert compare_reports(before1, audit_database(uri1)) == []
+            command.upgrade(cfg1, 'head')
+            assert compare_reports(before1, audit_database(uri1)) == []
+        finally:
+            eng1.dispose()
+
+        # Case 2: Inline column UNIQUE without ix_user_* indexes
+        db2 = tmp_path / 'legacy_autoindex_inline_uq.db'
+        conn2 = sqlite3.connect(db2)
+        try:
+            conn2.executescript(
+                """
+                CREATE TABLE user (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    username VARCHAR(80) NOT NULL UNIQUE,
+                    email VARCHAR(120) NOT NULL UNIQUE,
+                    password_hash VARCHAR(256) NOT NULL,
+                    recurring_budget FLOAT,
+                    registration_date DATETIME,
+                    avatar VARCHAR(50),
+                    display_name VARCHAR(80)
+                );
+                CREATE TABLE expense (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user(id),
+                    date VARCHAR(10) NOT NULL,
+                    category VARCHAR(50) NOT NULL,
+                    amount FLOAT NOT NULL,
+                    description VARCHAR(255),
+                    payment_method VARCHAR(50),
+                    created_at DATETIME
+                );
+                CREATE TABLE budget (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES user(id),
+                    year_month VARCHAR(7) NOT NULL,
+                    amount FLOAT NOT NULL,
+                    CONSTRAINT unique_user_month_budget UNIQUE (user_id, year_month)
+                );
+                INSERT INTO user (id, username, email, password_hash, recurring_budget, registration_date, avatar)
+                VALUES (1, 'Bob', 'bob@example.com', 'h1', 2500.25, '2026-01-01 00:00:00', 'avatar_1');
+                INSERT INTO expense (id, user_id, date, category, amount, payment_method, created_at)
+                VALUES (1, 1, '2026-07-09', 'Food', 19.99, 'Cash', '2026-07-09 10:00:00');
+                INSERT INTO budget (id, user_id, year_month, amount)
+                VALUES (1, 1, '2026-07', 4000.0);
+                """
+            )
+            conn2.commit()
+        finally:
+            conn2.close()
+
+        uri2 = f"sqlite:///{db2.as_posix()}"
+        cfg2 = _alembic_config(uri2)
+        before2 = audit_database(uri2)
+        command.stamp(cfg2, '0001_baseline')
+        command.upgrade(cfg2, 'head')
+
+        eng2 = sa.create_engine(uri2)
+        try:
+            assert compare_reports(before2, audit_database(uri2)) == []
+            assert TestSchemaReconciliation._unexplained_diffs(eng2) == []
+            with pytest.raises(sa.exc.IntegrityError):
+                with eng2.begin() as sa_conn:
+                    sa_conn.execute(sa.text(
+                        """INSERT INTO "user" (username, email, password_hash)
+                           VALUES ('Bob', 'other@example.com', 'h2')"""
+                    ))
+            with pytest.raises(sa.exc.IntegrityError):
+                with eng2.begin() as sa_conn:
+                    sa_conn.execute(sa.text(
+                        """INSERT INTO "user" (username, email, password_hash)
+                           VALUES ('Other', 'bob@example.com', 'h2')"""
+                    ))
+        finally:
+            eng2.dispose()

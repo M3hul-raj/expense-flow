@@ -8,6 +8,7 @@ Endpoint prefix: auth.<function_name>
 import re
 import logging
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from dateutil.relativedelta import relativedelta
 from flask import (
     Blueprint, render_template, request, redirect,
@@ -19,6 +20,7 @@ from extensions import limiter
 from utils import (
     is_logged_in, get_current_year_month, get_user_budget,
     get_budget_history, get_user_expenses_sorted,
+    paise_to_rupees_input, paise_to_chart_float,
 )
 
 logger = logging.getLogger('expenseflow')
@@ -216,36 +218,43 @@ def dashboard():
     expenses_obj = get_user_expenses_sorted(user_id)
 
     expenses = []
-    total_spent = 0.0
+    total_spent = 0
     category_totals = {}
     monthly_totals = {}
 
     current_year_month = get_current_year_month()
-    current_month_spent = 0.0
+    current_month_spent = 0
 
     for e in expenses_obj:
-        expenses.append([e.date.isoformat(), e.category, str(e.amount), e.description, e.payment_method])
+        expenses.append([
+            e.date.isoformat(),
+            e.category,
+            paise_to_rupees_input(e.amount_paise),
+            e.description,
+            e.payment_method,
+            e.amount_paise,
+        ])
 
-        total_spent += e.amount
-        category_totals[e.category] = category_totals.get(e.category, 0) + e.amount
+        total_spent += e.amount_paise
+        category_totals[e.category] = category_totals.get(e.category, 0) + e.amount_paise
 
         month_key = e.date.strftime('%Y-%m')
-        monthly_totals[month_key] = monthly_totals.get(month_key, 0) + e.amount
+        monthly_totals[month_key] = monthly_totals.get(month_key, 0) + e.amount_paise
 
         if month_key == current_year_month:
-            current_month_spent += e.amount
+            current_month_spent += e.amount_paise
 
     days_passed = max(1, datetime.now().day)
-    avg_daily_spend = current_month_spent / days_passed
+    avg_daily_spend = int((Decimal(current_month_spent) / Decimal(days_passed)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
     top_category = max(category_totals, key=category_totals.get) if category_totals else 'None'
 
     budget = get_user_budget(user_id, current_year_month)
-    recurring_budget = user.recurring_budget
+    recurring_budget = user.recurring_budget_paise
 
     budget_progress = (current_month_spent / budget) * 100 if budget > 0 else 0
 
     categories = list(category_totals.keys())
-    category_amounts = list(category_totals.values())
+    category_amounts = [paise_to_chart_float(v) for v in category_totals.values()]
 
     # Always produce exactly 6 months of trend data (oldest → newest),
     # filling ₹0 for months that have no recorded expenses.
@@ -255,12 +264,12 @@ def dashboard():
         d = datetime.now() - relativedelta(months=i)
         ym = d.strftime('%Y-%m')
         months.append(ym)
-        monthly_amounts.append(monthly_totals.get(ym, 0))
+        monthly_amounts.append(paise_to_chart_float(monthly_totals.get(ym, 0)))
 
     budget_history = get_budget_history(user_id, 6)
     budget_chart_labels = [item['month'] for item in budget_history]
-    budget_chart_budgets = [item['budget'] for item in budget_history]
-    budget_chart_spending = [item['spending'] for item in budget_history]
+    budget_chart_budgets = [paise_to_chart_float(item['budget']) for item in budget_history]
+    budget_chart_spending = [paise_to_chart_float(item['spending']) for item in budget_history]
 
     # budget_alert_level is used by the template banner (no flash — handled client-side)
     if budget_progress >= 100:

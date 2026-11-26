@@ -6,9 +6,20 @@ prevents circular imports (blueprints import from utils, not from each other).
 """
 import calendar as _calendar
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import re as _re
 from dateutil.relativedelta import relativedelta
 from flask import session
+from sqlalchemy import func
 from models import db, User, Expense, Budget
+
+# ── Monetary constants & helpers (integer paise internally) ──────────────────
+DEFAULT_BUDGET_PAISE = 200_000        # ₹2,000.00
+MAX_EXPENSE_RUPEES = 10_000_000       # ₹1,00,00,000.00
+MAX_BUDGET_RUPEES = 100_000_000       # ₹10,00,00,000.00
+
+_ASCII_DECIMAL_RE = _re.compile(r'^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$')
+_PAISE_PER_RUPEE = Decimal('100')
 
 # ── Savings tips ─────────────────────────────────────────────────────────────
 TIPS = [
@@ -18,6 +29,64 @@ TIPS = [
     "Use public transport to save fuel.",
     "Avoid unnecessary online purchases.",
 ]
+
+
+def parse_rupees_to_paise(raw_value, *, max_rupees=None):
+    """
+    Parse a decimal rupee input string into positive integer paise (ROUND_HALF_UP).
+
+    Returns (paise, None) on success, or (None, error_code) where error_code is one of:
+    'empty', 'invalid', 'non_positive', or 'too_large'.
+    """
+    cleaned = raw_value.strip() if isinstance(raw_value, str) else ''
+    if not cleaned:
+        return None, 'empty'
+    if not _ASCII_DECIMAL_RE.fullmatch(cleaned):
+        return None, 'invalid'
+    try:
+        dec = Decimal(cleaned)
+    except InvalidOperation:
+        return None, 'invalid'
+    if not dec.is_finite():
+        return None, 'invalid'
+    if dec <= 0:
+        return None, 'non_positive'
+    if max_rupees is not None and dec > Decimal(max_rupees):
+        return None, 'too_large'
+
+    paise = int((dec * _PAISE_PER_RUPEE).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+    if paise <= 0:
+        return None, 'non_positive'
+    if max_rupees is not None and paise > int(max_rupees) * 100:
+        return None, 'too_large'
+    return paise, None
+
+
+def paise_to_decimal(paise: int) -> Decimal:
+    """Convert integer paise to a quantized 2-decimal Rupee Decimal."""
+    return (Decimal(int(paise)) / _PAISE_PER_RUPEE).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def paise_to_rupees_input(paise: int) -> str:
+    """Format integer paise as plain 2-decimal rupee text for HTML form inputs and CSV."""
+    return f"{paise_to_decimal(paise):.2f}"
+
+
+def paise_to_chart_float(paise: int) -> float:
+    """Convert integer paise to a rounded rupee float strictly for Chart.js serialization."""
+    return float(paise_to_decimal(paise))
+
+
+def format_paise_as_rupees(paise: int, decimals: int = 2) -> str:
+    """Format integer paise as an Indian Rupee display string (e.g. ₹1,234.56)."""
+    dec = Decimal(int(paise)) / _PAISE_PER_RUPEE
+    sign = '-' if dec < 0 else ''
+    abs_dec = abs(dec)
+    if decimals <= 0:
+        quantized = abs_dec.quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+        return f"{sign}₹{quantized:,}"
+    quantized = abs_dec.quantize(Decimal('1.' + ('0' * decimals)), rounding=ROUND_HALF_UP)
+    return f"{sign}₹{quantized:,.{decimals}f}"
 
 
 def is_logged_in():
@@ -32,21 +101,21 @@ def get_current_year_month():
 
 def get_user_budget(user_id, year_month=None):
     """
-    Return the budget amount for a given user and month.
-    Priority: explicit Budget row > recurring_budget on User > default 2000.
+    Return the budget amount in paise for a given user and month.
+    Priority: explicit Budget row > recurring_budget_paise on User > default 200000 paise (₹2,000.00).
     """
     if not year_month:
         year_month = get_current_year_month()
 
     budget = Budget.query.filter_by(user_id=user_id, year_month=year_month).first()
     if budget:
-        return budget.amount
+        return int(budget.amount_paise)
 
     user = db.session.get(User, user_id)
-    if user and user.recurring_budget is not None:
-        return user.recurring_budget
+    if user and user.recurring_budget_paise is not None:
+        return int(user.recurring_budget_paise)
 
-    return 2000.0  # Default budget
+    return DEFAULT_BUDGET_PAISE
 
 
 def month_date_range(year_month):
@@ -57,19 +126,23 @@ def month_date_range(year_month):
 
 
 def get_monthly_spending(user_id, year_month):
-    """Return total amount spent by a user in the given YYYY-MM month."""
+    """Return total amount spent in paise by a user in the given YYYY-MM month."""
     start_date, end_date = month_date_range(year_month)
-    expenses = Expense.query.filter(
-        Expense.user_id == user_id,
-        Expense.date >= start_date,
-        Expense.date < end_date,
-    ).all()
-    return sum(e.amount for e in expenses)
+    total = (
+        db.session.query(func.coalesce(func.sum(Expense.amount_paise), 0))
+        .filter(
+            Expense.user_id == user_id,
+            Expense.date >= start_date,
+            Expense.date < end_date,
+        )
+        .scalar()
+    )
+    return int(total or 0)
 
 
 def get_budget_history(user_id, months=6):
     """
-    Build a budget vs spending summary for the last N months.
+    Build a budget vs spending summary (values in integer paise) for the last N months.
     Returns a list of dicts with keys: month, year_month, budget, spending,
     status ('On Track' / 'Near Limit' / 'Over Budget'), remaining.
     """
@@ -77,25 +150,25 @@ def get_budget_history(user_id, months=6):
     current_date = datetime.now()
 
     for i in range(months):
-        date = current_date - relativedelta(months=i)
-        year_month = date.strftime("%Y-%m")
+        dt = current_date - relativedelta(months=i)
+        year_month = dt.strftime("%Y-%m")
 
-        budget_amount = get_user_budget(user_id, year_month)
-        spending = get_monthly_spending(user_id, year_month)
+        budget_paise = get_user_budget(user_id, year_month)
+        spending_paise = get_monthly_spending(user_id, year_month)
 
         status = "On Track"
-        if spending > budget_amount:
+        if spending_paise > budget_paise:
             status = "Over Budget"
-        elif spending > budget_amount * 0.9:
+        elif spending_paise * 10 > budget_paise * 9:
             status = "Near Limit"
 
         history.append({
-            'month': f"{_calendar.month_name[date.month]} {date.year}",
+            'month': f"{_calendar.month_name[dt.month]} {dt.year}",
             'year_month': year_month,
-            'budget': budget_amount,
-            'spending': spending,
+            'budget': budget_paise,
+            'spending': spending_paise,
             'status': status,
-            'remaining': budget_amount - spending
+            'remaining': budget_paise - spending_paise,
         })
 
     return history

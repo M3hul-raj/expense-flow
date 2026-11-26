@@ -230,6 +230,8 @@ class TestMigrationVerificationScript:
         assert before['per_user_expense_paise'] == {1: 2059, 2: 999999999}
         assert before['total_expense_paise'] == 1000002058
         assert before['per_user_budget_paise'] == {1: 1000050, 2: 10000000000}
+        assert before['per_user_recurring_budget_paise'] == {1: 500000}
+        assert before['total_recurring_budget_paise'] == 500000
 
         proc = subprocess.run(
             [sys.executable, str(REPO_ROOT / 'scripts' / 'verify_migration.py'), uri, '--strict', '--check-not-null'],
@@ -249,6 +251,40 @@ class TestMigrationVerificationScript:
             'total_expense_paise': 1000002057,
         }
         assert compare_reports(before, tampered)
+
+        tampered_recurring = {
+            **before,
+            'per_user_recurring_budget_paise': {1: 499999},
+            'total_recurring_budget_paise': 499999,
+        }
+        assert compare_reports(before, tampered_recurring)
+
+    def test_verify_migration_conserves_paise_across_full_0001_to_0005_upgrade(self, tmp_path):
+        from alembic import command
+        from alembic.config import Config
+        from scripts.verify_migration import audit_database, compare_reports
+
+        db_file = tmp_path / 'clean_full_upgrade.db'
+        create_clean_edge_case_pre1b_sqlite_fixture(db_file)
+        uri = f"sqlite:///{db_file.as_posix()}"
+
+        before = audit_database(uri)
+        cfg = Config(str(REPO_ROOT / 'alembic.ini'))
+        cfg.set_main_option('script_location', str(REPO_ROOT / 'alembic'))
+        cfg.set_main_option('sqlalchemy.url', uri)
+        command.stamp(cfg, '0001_baseline')
+        command.upgrade(cfg, 'head')
+
+        after = audit_database(uri)
+        assert compare_reports(before, after) == []
+
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / 'scripts' / 'verify_migration.py'), uri, '--strict', '--check-not-null'],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert '"total_recurring_budget_paise": 500000' in proc.stdout
 
     def test_audit_database_works_against_postgres_too(self, tmp_path):
         from alembic import command

@@ -136,15 +136,22 @@ def audit_database(database_uri: str) -> dict:
             recurring_le_zero = 0
             user_reg_nulls = 0
             user_avatar_nulls = 0
-            for rec_val, reg_val, avatar_val in conn.execute(
-                sa.text(f'SELECT {recurring_col}, registration_date, avatar FROM "user"')
+            per_user_recurring_budget_paise: dict[int, int] = {}
+            total_recurring_budget_paise = 0
+            for uid, rec_val, reg_val, avatar_val in conn.execute(
+                sa.text(f'SELECT id, {recurring_col}, registration_date, avatar FROM "user"')
             ):
                 if rec_val is not None:
-                    _, valid_rec, _ = _to_paise_and_precision_flag(
+                    paise, valid_rec, gt2 = _to_paise_and_precision_flag(
                         rec_val, recurring_col == 'recurring_budget_paise'
                     )
                     if not valid_rec:
                         recurring_le_zero += 1
+                    elif paise is not None:
+                        per_user_recurring_budget_paise[uid] = paise
+                        total_recurring_budget_paise += paise
+                    if gt2:
+                        float_gt_2_decimals += 1
                 if reg_val is None:
                     user_reg_nulls += 1
                 if avatar_val is None:
@@ -229,10 +236,13 @@ def audit_database(database_uri: str) -> dict:
             },
             'total_expense_paise': total_expense_paise,
             'total_budget_paise': total_budget_paise,
+            'total_recurring_budget_paise': total_recurring_budget_paise,
             'per_user_expense_paise': per_user_expense_paise,
             'per_user_budget_paise': per_user_budget_paise,
+            'per_user_recurring_budget_paise': per_user_recurring_budget_paise,
             'per_user_expense_digest': _digest_user_totals(per_user_expense_paise),
             'per_user_budget_digest': _digest_user_totals(per_user_budget_paise),
+            'per_user_recurring_budget_digest': _digest_user_totals(per_user_recurring_budget_paise),
             'unparseable_dates': unparseable_dates,
             'case_collisions': {
                 'username': username_collisions,
@@ -270,10 +280,14 @@ def compare_reports(before: dict, after: dict) -> list[str]:
         errors.append('total_expense_paise_mismatch')
     if before['total_budget_paise'] != after['total_budget_paise']:
         errors.append('total_budget_paise_mismatch')
+    if before['total_recurring_budget_paise'] != after['total_recurring_budget_paise']:
+        errors.append('total_recurring_budget_paise_mismatch')
     if before['per_user_expense_paise'] != after['per_user_expense_paise']:
         errors.append('per_user_expense_paise_mismatch')
     if before['per_user_budget_paise'] != after['per_user_budget_paise']:
         errors.append('per_user_budget_paise_mismatch')
+    if before['per_user_recurring_budget_paise'] != after['per_user_recurring_budget_paise']:
+        errors.append('per_user_recurring_budget_paise_mismatch')
     return errors
 
 
@@ -283,10 +297,13 @@ def _summary_for_stdout(report: dict) -> dict:
         'row_counts': report['row_counts'],
         'total_expense_paise': report['total_expense_paise'],
         'total_budget_paise': report['total_budget_paise'],
+        'total_recurring_budget_paise': report['total_recurring_budget_paise'],
         'users_with_expenses_count': len(report['per_user_expense_paise']),
         'users_with_budgets_count': len(report['per_user_budget_paise']),
+        'users_with_recurring_budget_count': len(report['per_user_recurring_budget_paise']),
         'per_user_expense_digest': report['per_user_expense_digest'],
         'per_user_budget_digest': report['per_user_budget_digest'],
+        'per_user_recurring_budget_digest': report['per_user_recurring_budget_digest'],
         'unparseable_dates': report['unparseable_dates'],
         'case_collisions': report['case_collisions'],
         'non_positive_amounts': report['non_positive_amounts'],
