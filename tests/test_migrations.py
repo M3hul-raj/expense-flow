@@ -149,3 +149,69 @@ class TestAlembicBaseline:
         """SQLAlchemy MetaData must define deterministic constraint naming conventions."""
         assert db.metadata.naming_convention == NAMING_CONVENTION
         assert {'ix', 'uq', 'ck', 'fk', 'pk'}.issubset(set(NAMING_CONVENTION))
+
+
+class TestDeployScriptModes:
+    """Tests for explicit --stamp / --upgrade-to CLI modes in deploy/pa_deploy.sh."""
+
+    @staticmethod
+    def _find_bash():
+        import shutil
+        import subprocess
+
+        candidates = [
+            r'C:\Program Files\Git\bin\bash.exe',
+            r'C:\Program Files\Git\usr\bin\bash.exe',
+            shutil.which('bash'),
+        ]
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                probe = subprocess.run([candidate, '-c', 'echo ok'], capture_output=True, text=True)
+                if probe.returncode == 0 and probe.stdout.strip() == 'ok':
+                    return candidate
+        pytest.skip('Working bash binary not available')
+
+    def _run_deploy(self, *args):
+        import subprocess
+
+        bash = self._find_bash()
+        script = (REPO_ROOT / 'deploy' / 'pa_deploy.sh').as_posix()
+        return subprocess.run([bash, script, *args], capture_output=True, text=True, cwd=str(REPO_ROOT))
+
+    @pytest.mark.parametrize(
+        'bad_args',
+        [
+            (),
+            ('--dry-run',),
+            ('--unknown',),
+            ('--stamp',),
+            ('--stamp', '--dry-run'),
+            ('--upgrade-to',),
+            ('--upgrade-to', '--dry-run'),
+            ('--stamp', '0001_baseline', '--upgrade-to', '0002_dates'),
+            ('--stamp', 'head'),
+            ('--upgrade-to', 'head'),
+            ('--upgrade-to', 'heads'),
+            ('--upgrade-to', 'base'),
+            ('--stamp', '0001_baseline', 'extra_arg'),
+        ],
+    )
+    def test_rejects_missing_target_or_invalid_modes(self, bad_args):
+        """deploy/pa_deploy.sh must reject missing mode, missing revision, extra args, or head/base."""
+        res = self._run_deploy(*bad_args)
+        assert res.returncode != 0
+
+    def test_stamp_dry_run_outputs_alembic_stamp_and_locked_install(self):
+        res = self._run_deploy('--stamp', '0001_baseline', '--dry-run')
+        assert res.returncode == 0, res.stderr
+        assert 'alembic stamp "0001_baseline"' in res.stdout or 'alembic stamp 0001_baseline' in res.stdout
+        assert 'requirements.lock' in res.stdout
+        assert 'alembic upgrade' not in res.stdout
+
+    def test_upgrade_to_dry_run_outputs_explicit_target_and_locked_install(self):
+        res = self._run_deploy('--upgrade-to', '0002_dates', '--dry-run')
+        assert res.returncode == 0, res.stderr
+        assert 'alembic upgrade "0002_dates"' in res.stdout or 'alembic upgrade 0002_dates' in res.stdout
+        assert 'requirements.lock' in res.stdout
+        assert 'alembic stamp' not in res.stdout
+        assert 'upgrade head' not in res.stdout

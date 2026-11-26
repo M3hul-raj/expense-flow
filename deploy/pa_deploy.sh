@@ -1,19 +1,83 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  cat >&2 <<EOF
+Usage: $0 (--stamp REVISION | --upgrade-to REVISION) [--dry-run]
+EOF
+}
+
 DRY_RUN=false
-for arg in "$@"; do
-  case "$arg" in
+MODE=""
+TARGET_REVISION=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --stamp)
+      if [ -n "$MODE" ]; then
+        echo "Error: specify only one of --stamp or --upgrade-to" >&2
+        usage
+        exit 2
+      fi
+      if [ "$#" -lt 2 ] || [[ "$2" == -* ]] || [ -z "$2" ]; then
+        echo "Error: --stamp requires a target REVISION" >&2
+        usage
+        exit 2
+      fi
+      MODE="stamp"
+      TARGET_REVISION="$2"
+      shift 2
+      ;;
+    --upgrade-to)
+      if [ -n "$MODE" ]; then
+        echo "Error: specify only one of --stamp or --upgrade-to" >&2
+        usage
+        exit 2
+      fi
+      if [ "$#" -lt 2 ] || [[ "$2" == -* ]] || [ -z "$2" ]; then
+        echo "Error: --upgrade-to requires a target REVISION" >&2
+        usage
+        exit 2
+      fi
+      MODE="upgrade-to"
+      TARGET_REVISION="$2"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=true
+      shift
       ;;
     *)
-      echo "Unknown option: $arg" >&2
-      echo "Usage: $0 [--dry-run]" >&2
+      echo "Unknown option or argument: $1" >&2
+      usage
       exit 2
       ;;
   esac
 done
+
+if [ -z "$MODE" ]; then
+  echo "Error: missing deploy migration mode (--stamp REVISION or --upgrade-to REVISION)" >&2
+  usage
+  exit 2
+fi
+
+case "$TARGET_REVISION" in
+  head|heads|base|current)
+    echo "Error: explicit revision ID required (got '$TARGET_REVISION')" >&2
+    exit 2
+    ;;
+esac
+
+if ! [[ "$TARGET_REVISION" =~ ^[0-9A-Za-z_.-]+$ ]]; then
+  echo "Error: invalid revision format '$TARGET_REVISION'" >&2
+  exit 2
+fi
+
+if [ "$MODE" = "stamp" ]; then
+  ALEMBIC_CMD="alembic stamp \"$TARGET_REVISION\""
+else
+  ALEMBIC_CMD="alembic upgrade \"$TARGET_REVISION\""
+fi
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_DIR="$HOME/backups"
@@ -30,7 +94,9 @@ if [ "$DRY_RUN" = true ]; then
 [dry-run] sqlite3 "$BACKUP_FILE" "PRAGMA integrity_check;"
 [dry-run] sqlite3 "$BACKUP_FILE" 'SELECT COUNT(*) AS users FROM "user"; SELECT COUNT(*) AS expenses FROM "expense";'
 [dry-run] git pull --ff-only origin main
-[dry-run] pip install -r requirements.txt -q
+[dry-run] pip install -r requirements.lock -q
+[dry-run] export EXPENSEFLOW_DATABASE_URI="\${EXPENSEFLOW_DATABASE_URI:-sqlite:///\$PWD/instance/expenses.db}"
+[dry-run] $ALEMBIC_CMD
 [dry-run] python -m pytest tests/ -q
 [dry-run] echo "Rollback command: git reset --hard <old_hash>"
 [dry-run] echo "NEXT: click Reload on the Web tab"
@@ -64,7 +130,13 @@ echo "Backup row counts:"
 sqlite3 "$BACKUP_FILE" 'SELECT COUNT(*) AS users FROM "user"; SELECT COUNT(*) AS expenses FROM "expense";'
 
 git pull --ff-only origin main
-pip install -r requirements.txt -q
+pip install -r requirements.lock -q
+export EXPENSEFLOW_DATABASE_URI="${EXPENSEFLOW_DATABASE_URI:-sqlite:///$PWD/instance/expenses.db}"
+if [ "$MODE" = "stamp" ]; then
+  alembic stamp "$TARGET_REVISION"
+else
+  alembic upgrade "$TARGET_REVISION"
+fi
 python -m pytest tests/ -q
 
 echo "Deploy succeeded."
