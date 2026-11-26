@@ -37,20 +37,20 @@
 
                         <!-- Tab Content -->
                         <div class="tab-content" id="avatarTabsContent">
-                            <!-- 3D Avatars (1-16) -->
+                            <!-- 3D Avatars -->
                             <div class="tab-pane fade show active" id="pills-3d" role="tabpanel">
                                 <div class="avatar-grid" id="avatarGrid3D">
-                                    {% for i in range(1, 17) %}
+                                    {% for i in range(1, avatar_3d_count + 1) %}
                                     <div class="avatar-option {% if current_avatar == 'avatar_' ~ i %}selected{% endif %}" data-avatar="avatar_{{ i }}">
                                         <span class="avatar avatar-md avatar-{{ i }}"></span>
                                     </div>
                                     {% endfor %}
                                 </div>
                             </div>
-                            <!-- 2D Avatars (17-40) -->
+                            <!-- 2D Avatars -->
                             <div class="tab-pane fade" id="pills-2d" role="tabpanel">
                                 <div class="avatar-grid" id="avatarGrid2D">
-                                    {% for i in range(17, 41) %}
+                                    {% for i in range(avatar_3d_count + 1, avatar_count + 1) %}
                                     <div class="avatar-option {% if current_avatar == 'avatar_' ~ i %}selected{% endif %}" data-avatar="avatar_{{ i }}">
                                         <span class="avatar avatar-md avatar-{{ i }}"></span>
                                     </div>
@@ -78,22 +78,23 @@
 
                     <div class="mb-3">
                         <label for="email" class="form-label"><i class="fas fa-envelope text-muted me-2"></i>Email Address</label>
-                        <input type="email" class="form-control" id="email" name="email" value="{{ email }}" required>
+                        <input type="email" class="form-control" id="email" name="email" value="{{ email }}" data-original-email="{{ email }}" required>
+                        <div class="form-text" style="font-size:0.75rem;color:var(--text-muted);">Changing your email requires confirming your current password.</div>
                     </div>
                     
                     <hr class="my-4" style="border-color: var(--border-color);">
                     
                     <button type="button" class="btn btn-outline-secondary btn-sm rounded-pill mb-3" data-bs-toggle="collapse" data-bs-target="#passwordSection" aria-expanded="false" aria-controls="passwordSection">
-                        <i class="fas fa-key me-2"></i>Change Password
+                        <i class="fas fa-key me-2"></i>Security &amp; Password
                     </button>
 
                     <div class="collapse" id="passwordSection">
                         <div class="p-3 mb-4 rounded" style="background-color: var(--surface-alt); border: 1px solid var(--border-color);">
-                            <h5 class="fw-bold mb-3 fs-6">Update Password</h5>
+                            <h5 class="fw-bold mb-3 fs-6">Security Verification</h5>
 
                             <div class="mb-3">
                                 <label for="current_password" class="form-label"><i class="fas fa-lock text-muted me-2"></i>Current Password</label>
-                                <input type="password" class="form-control" id="current_password" name="current_password" placeholder="Required if changing password">
+                                <input type="password" class="form-control" id="current_password" name="current_password" placeholder="Required if changing email or password">
                             </div>
 
                             <div class="mb-3">
@@ -148,29 +149,42 @@
         document.getElementById('avatarSection').classList.toggle('d-none');
     });
 
-    // Dynamic password requirement
+    // Dynamic password requirement (changing password or email requires current_password)
     var newPass = document.getElementById('new_password');
     var currentPass = document.getElementById('current_password');
-    newPass.addEventListener('input', function() {
-        if (newPass.value.length > 0) {
-            currentPass.required = true;
-        } else {
-            currentPass.required = false;
-        }
-    });
+    var emailInput = document.getElementById('email');
+    var passwordSection = document.getElementById('passwordSection');
+    var originalEmail = (emailInput.dataset.originalEmail || '').trim();
 
-    // Client-side validation for password confirmation
+    function syncPasswordRequirement() {
+        var emailChanged = emailInput.value.trim() !== originalEmail;
+        var changingPass = newPass.value.length > 0;
+        currentPass.required = emailChanged || changingPass;
+        if (emailChanged && passwordSection && window.bootstrap) {
+            window.bootstrap.Collapse.getOrCreateInstance(passwordSection, { toggle: false }).show();
+        }
+    }
+
+    newPass.addEventListener('input', syncPasswordRequirement);
+    emailInput.addEventListener('input', syncPasswordRequirement);
+
+    // Client-side validation for password confirmation and current password
     document.querySelector('form').addEventListener('submit', function(e) {
         var newPassword = newPass.value;
         var confirmPassword = document.getElementById('confirm_password').value;
+        var emailChanged = emailInput.value.trim() !== originalEmail;
 
         if (newPassword && newPassword !== confirmPassword) {
             e.preventDefault();
             alert('New passwords do not match. Please try again.');
         }
-        if (newPassword && !currentPass.value) {
+        if ((newPassword || emailChanged) && !currentPass.value) {
             e.preventDefault();
-            alert('Please enter your current password to set a new password.');
+            if (passwordSection && window.bootstrap) {
+                window.bootstrap.Collapse.getOrCreateInstance(passwordSection, { toggle: false }).show();
+            }
+            alert('Please enter your current password to confirm this change.');
+            currentPass.focus();
         }
     });
 </script>

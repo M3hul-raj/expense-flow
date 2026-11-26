@@ -13,6 +13,7 @@ from flask import (
     Blueprint, render_template, request, redirect,
     session, flash, url_for, make_response,
 )
+from sqlalchemy.exc import IntegrityError
 from models import db, User
 from extensions import limiter
 from utils import (
@@ -23,6 +24,29 @@ from utils import (
 logger = logging.getLogger('expenseflow')
 
 auth_bp = Blueprint('auth', __name__)
+
+AVATAR_COUNT = 40
+AVATAR_3D_COUNT = 16
+VALID_AVATARS = {f'avatar_{i}' for i in range(1, AVATAR_COUNT + 1)}
+EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def _validate_username(username):
+    """Validate username rules; return error message or None."""
+    if not username or len(username) < 3:
+        return 'Username must be at least 3 characters long.'
+    if len(username) > 30:
+        return 'Username must be 30 characters or fewer.'
+    if not re.match(r'^[a-zA-Z0-9_]+$', username):
+        return 'Username may only contain letters, numbers, and underscores.'
+    return None
+
+
+def _validate_email(email):
+    """Validate email format and DB column limit; return error message or None."""
+    if not email or len(email) > 120 or not EMAIL_RE.match(email):
+        return 'Please enter a valid email address.'
+    return None
 
 
 # ── Landing page ──────────────────────────────────────────────────────────────
@@ -49,17 +73,13 @@ def register():
         confirm_password = request.form.get('confirm_password', '')
 
         # ── Server-side validation ────────────────────────────────────────
-        if not username or len(username) < 3:
-            flash('Username must be at least 3 characters long.', 'error')
+        username_err = _validate_username(username)
+        if username_err:
+            flash(username_err, 'error')
             return redirect(url_for('auth.register'))
-        if len(username) > 30:
-            flash('Username must be 30 characters or fewer.', 'error')
-            return redirect(url_for('auth.register'))
-        if not re.match(r'^[a-zA-Z0-9_]+$', username):
-            flash('Username may only contain letters, numbers, and underscores.', 'error')
-            return redirect(url_for('auth.register'))
-        if not email or '@' not in email or '.' not in email.split('@')[-1]:
-            flash('Please enter a valid email address.', 'error')
+        email_err = _validate_email(email)
+        if email_err:
+            flash(email_err, 'error')
             return redirect(url_for('auth.register'))
         if not password:
             flash('Password is required.', 'error')
@@ -150,15 +170,13 @@ def login():
             flash('Login successful!', 'success')
             return redirect(url_for('auth.dashboard'))
 
-        # Failed login — log and flash appropriate message
+        # Failed login — log distinct reason internally, return generic response to caller
         if not user:
             logger.warning('Login attempt for unknown user: %s', username_or_email)
-            flash('User does not exist. Please sign up first!', 'error')
-            return redirect(url_for('auth.register'))
         else:
             logger.warning('Wrong password for user: %s', username_or_email)
-            flash('Invalid password. Please try again!', 'error')
-            return redirect(url_for('auth.login'))
+        flash('Invalid username/email or password.', 'error')
+        return redirect(url_for('auth.login'))
 
     return render_template('login.html')
 
@@ -298,13 +316,32 @@ def edit_profile():
         return redirect(url_for('auth.login'))
 
     if request.method == 'POST':
-        new_username = request.form['username']
-        new_email = request.form['email']
-        current_password = request.form['current_password']
-        new_password = request.form['new_password']
-        confirm_password = request.form['confirm_password']
-        new_avatar = request.form.get('avatar', user.avatar or 'avatar_1')
-        new_display_name = request.form.get('display_name', '').strip() or None
+        new_username = request.form.get('username', '').strip()
+        new_email = request.form.get('email', '').strip()
+        current_password = request.form.get('current_password', '')
+        new_password = request.form.get('new_password', '')
+        confirm_password = request.form.get('confirm_password', '')
+        new_avatar = request.form.get('avatar', user.avatar or 'avatar_1').strip()
+        raw_display_name = request.form.get('display_name', '').strip()
+
+        username_err = _validate_username(new_username)
+        if username_err:
+            flash(username_err, 'error')
+            return redirect(url_for('auth.edit_profile'))
+
+        email_err = _validate_email(new_email)
+        if email_err:
+            flash(email_err, 'error')
+            return redirect(url_for('auth.edit_profile'))
+
+        if len(raw_display_name) > 80:
+            flash('Display name must be 80 characters or fewer.', 'error')
+            return redirect(url_for('auth.edit_profile'))
+        new_display_name = raw_display_name or None
+
+        if new_avatar not in VALID_AVATARS:
+            flash('Please select a valid avatar.', 'error')
+            return redirect(url_for('auth.edit_profile'))
 
         if new_username != user.username:
             existing_user = User.query.filter_by(username=new_username).first()
@@ -313,6 +350,9 @@ def edit_profile():
                 return redirect(url_for('auth.edit_profile'))
 
         if new_email != user.email:
+            if not current_password or not user.check_password(current_password):
+                flash('Current password is required and must be correct to change your email address.', 'error')
+                return redirect(url_for('auth.edit_profile'))
             existing_email = User.query.filter_by(email=new_email).first()
             if existing_email:
                 flash('Email already in use. Please choose a different one.', 'error')
@@ -334,7 +374,12 @@ def edit_profile():
         user.email = new_email
         user.avatar = new_avatar
         user.display_name = new_display_name
-        db.session.commit()
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            flash('Username or email is already in use. Please choose a different one.', 'error')
+            return redirect(url_for('auth.edit_profile'))
 
         session['username'] = new_username
         session['email'] = new_email
@@ -349,5 +394,7 @@ def edit_profile():
                            username=user.username,
                            email=user.email,
                            current_avatar=user.avatar or 'avatar_1',
+                           avatar_count=AVATAR_COUNT,
+                           avatar_3d_count=AVATAR_3D_COUNT,
                            display_name=user.display_name,
                            registration_date=reg_date)

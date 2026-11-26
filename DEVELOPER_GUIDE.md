@@ -37,7 +37,8 @@ expense-flow/
 │   └── main.py                 # PWA routes: /sw.js, /manifest.json, /offline.
 ├── tests/
 │   ├── conftest.py             # Shared pytest fixtures (isolated in-memory SQLite per test).
-│   └── test_app.py             # 26 functional tests: CRUD, budget logic, validation, CSRF.
+│   ├── test_app.py             # 26 functional tests: CRUD, budget logic, validation, CSRF.
+│   └── test_regressions.py     # 61 regression tests: config, security, validation, escaping.
 ├── static/
 │   ├── main.css                # The core CSS Design System (CSS Variables, Dark/Light modes).
 │   ├── avatars.css             # Avatar styling for profile selection.
@@ -100,9 +101,9 @@ The `/export/pdf` route utilizes the **ReportLab (`Platypus` engine)** to genera
 *   It features custom table styling, pagination, and dynamic headers based on the current user's session data.
 
 ### D. Progressive Web App (PWA) Offline Resilience
-The application utilizes a custom Service Worker (`sw.js`) to intercept network requests:
-*   **Cache-First Strategy:** Static assets (CSS, logos, JS) are served instantly from the local cache.
-*   **Network-First Strategy:** HTML pages attempt to fetch fresh data from the server, but gracefully fall back to a custom `offline.html` page if the user loses connectivity.
+The application utilizes a custom Service Worker (`sw.js`, cache `expenseflow-v3`) to intercept network requests:
+*   **Cache-First Strategy:** Static assets (CSS, icons, CDN JS/fonts) and `/offline` are served from the local cache.
+*   **Network-Only Strategy for HTML:** HTML page navigations always hit the server directly and are never stored in Cache Storage (preventing cached private pages after logout), falling back to the pre-cached `/offline` page when offline.
 
 ### E. High-Fidelity Glassmorphism & Animations
 The landing page implements high-end visual design techniques seen in top-tier SaaS platforms.
@@ -120,26 +121,39 @@ All POST forms include a hidden `csrf_token()` field validated by **Flask-WTF's 
 *   **Testing:** CSRF is disabled in the test configuration (`WTF_CSRF_ENABLED=False`) so functional tests can POST without tokens. Two dedicated tests re-enable CSRF to verify rejection without a valid token.
 
 ### H. Automated Testing & CI
-The `tests/` directory contains **26 pytest tests** covering:
+The `tests/` directory contains **87 pytest tests** across `test_app.py` and `test_regressions.py` covering:
 *   **Expense CRUD** — add, edit, delete with server-side validation (negative amounts, future dates, invalid categories)
 *   **Cross-user isolation** — one user cannot edit/delete another user's expenses (returns 404)
-*   **Budget logic** — default budget, explicit budget row, recurring fallback, override priority
+*   **Budget logic** — default budget, explicit budget row, recurring fallback, override priority, and strict ASCII input validation
+*   **Security & regressions** — fail-fast production `EXPENSEFLOW_SECRET_KEY` (32+ chars), secure cookie flags, generic login errors, `/edit_profile` password gate for email changes, ReportLab XML escaping, and dashboard recent-transactions ordering
 *   **CSRF enforcement** — POST without token returns 400
 
-Tests run against an isolated **in-memory SQLite database** created via `create_app('testing')` — the production `expenses.db` is never touched. **GitHub Actions CI** (`.github/workflows/ci.yml`) runs `pytest tests/ -v` on every push and pull request to `main`.
+Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:`) created via `create_app('testing')` — the production `expenses.db` is never touched. **GitHub Actions CI** (`.github/workflows/ci.yml`) runs `pytest tests/ -v` across Python 3.10, 3.11, 3.12, and 3.13 on every push and pull request to `main`.
 
 ---
 
-## 5. Deployment & Local Setup
+## 5. Deployment, Configuration & Local Setup
+
+### Environment Variables & Application Factory Behavior
+*   **`EXPENSEFLOW_ENV`** (`production`, `development`, or `testing`):
+    *   `create_app()` (and the lazy module-level `app` attribute accessed by Gunicorn/WSGI) defaults `EXPENSEFLOW_ENV` to **`production`**.
+    *   Running `python app.py` directly (`__main__`) defaults `EXPENSEFLOW_ENV` to **`development`** and binds Flask to `127.0.0.1:5000` with `debug=True`.
+    *   `testing` mode always uses an in-memory SQLite database (`sqlite:///:memory:`) and disables CSRF and rate limiting.
+*   **`EXPENSEFLOW_SECRET_KEY`**:
+    *   **Required in `production`**: must be non-default and at least **32 characters** after stripping surrounding whitespace; otherwise `create_app('production')` fails fast with `RuntimeError`.
+    *   Generate a strong production key with: `python -c "import secrets; print(secrets.token_hex(32))"`
+    *   In `development` mode, a built-in fallback key is used automatically so no manually configured key is required locally.
+*   **`EXPENSEFLOW_DATABASE_URI`**:
+    *   Optional SQLAlchemy database URI used in `production` and `development`. Defaults to `sqlite:///expenses.db` when unset.
 
 ### Local Development Setup
 1. Clone the repository: `git clone https://github.com/M3hul-raj/expense-flow.git`
 2. Create and activate a virtual environment: `python -m venv venv`
 3. Install dependencies: `pip install -r requirements.txt`
-4. Run the Flask development server: `python app.py`
+4. Run the Flask development server: `python app.py` (defaults to `development` mode on `http://127.0.0.1:5000/`)
 
 ### Production Deployment (WSGI)
-When pushing updates to a live server (e.g., PythonAnywhere), the WSGI daemon must be reloaded after fetching the latest code.
+When deploying to a live server (e.g., PythonAnywhere), set `EXPENSEFLOW_ENV=production` and `EXPENSEFLOW_SECRET_KEY` (32+ chars) in the WSGI configuration file before `from app import app as application`, then reload the WSGI daemon after fetching updates:
 ```bash
 git pull origin main
 touch /var/www/your_username_pythonanywhere_com_wsgi.py

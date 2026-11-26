@@ -1,5 +1,5 @@
-// ExpenseFlow Service Worker — v1
-const CACHE_NAME = 'expenseflow-v2';
+// ExpenseFlow Service Worker — v3
+const CACHE_NAME = 'expenseflow-v3';
 
 // Static assets to pre-cache on install
 const PRE_CACHE = [
@@ -60,8 +60,10 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       caches.match(event.request).then((cached) => {
         return cached || fetch(event.request).then((response) => {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          if (response && response.ok) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
           return response;
         });
       })
@@ -69,32 +71,17 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Strategy 2: Network-first for HTML pages (data always fresh when online)
-  if (event.request.headers.get('accept')?.includes('text/html')) {
+  // Strategy 2: Network-only for HTML pages (never cache authenticated pages)
+  if (
+    event.request.mode === 'navigate' ||
+    event.request.headers.get('accept')?.includes('text/html')
+  ) {
     event.respondWith(
-      fetch(event.request)
-        .then((response) => {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          return response;
-        })
-        .catch(() => {
-          return caches.match(event.request).then((cached) => {
-            return cached || caches.match('/offline');
-          });
-        })
+      fetch(event.request).catch(() => caches.match('/offline'))
     );
     return;
   }
 
-  // Default: network with cache fallback
-  event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        return response;
-      })
-      .catch(() => caches.match(event.request))
-  );
+  // Default: network-only so dynamic endpoints or exports are never cached
+  event.respondWith(fetch(event.request));
 });
