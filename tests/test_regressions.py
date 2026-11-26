@@ -461,8 +461,3 @@ class TestDashboardRecentTransactions:
         assert 'Oldest-1' not in html
         assert 'Oldest-2' not in html
         assert html.index('Recent-7') < html.index('Recent-6') < html.index('Recent-5')
-
-
-
-
-
