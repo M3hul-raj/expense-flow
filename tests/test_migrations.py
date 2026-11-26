@@ -329,6 +329,7 @@ class TestSchemaReconciliation:
                 ('email',),
             }
             assert len(insp.get_unique_constraints('user')) == 2
+            command.upgrade(cfg, 'head')
             assert self._unexplained_diffs(engine) == []
 
             with engine.connect() as conn:
@@ -356,22 +357,21 @@ class TestSchemaReconciliation:
             command.upgrade(cfg, '0001_baseline')
             command.upgrade(cfg, '0002_reconcile_prod_schema')
 
-            with engine.connect() as conn:
-                ctx = MigrationContext.configure(
-                    conn, opts={'compare_type': True, 'compare_server_default': True}
-                )
-                assert compare_metadata(ctx, db.metadata) == []
-                insp = sa.inspect(conn)
-                user_indexes = insp.get_indexes('user')
-                assert {i['name'] for i in user_indexes} == {'ix_user_username', 'ix_user_email'}
-                assert len(user_indexes) == 2
+            insp = sa.inspect(engine)
+            avatar_col = next(c for c in insp.get_columns('user') if c['name'] == 'avatar')
+            assert avatar_col.get('default') is not None
+            user_indexes = insp.get_indexes('user')
+            assert {i['name'] for i in user_indexes} == {'ix_user_username', 'ix_user_email'}
+            assert len(user_indexes) == 2
 
             command.downgrade(cfg, '0001_baseline')
             insp_down = sa.inspect(engine)
+            assert next(c for c in insp_down.get_columns('user') if c['name'] == 'avatar').get('default') is None
             assert 'idx_expense_user_date' in {i['name'] for i in insp_down.get_indexes('expense')}
             assert 'ix_budget_user_id' in {i['name'] for i in insp_down.get_indexes('budget')}
 
             command.upgrade(cfg, '0002_reconcile_prod_schema')
+            command.upgrade(cfg, 'head')
             with engine.connect() as conn:
                 ctx = MigrationContext.configure(
                     conn, opts={'compare_type': True, 'compare_server_default': True}
@@ -417,5 +417,111 @@ class TestSchemaReconciliation:
             with engine.connect() as conn:
                 assert list(conn.execute(sa.text('PRAGMA foreign_key_check'))) == []
                 assert conn.execute(sa.text('SELECT COUNT(*) FROM expense')).scalar_one() == 1
+        finally:
+            engine.dispose()
+
+
+class TestExpenseDateMigration:
+    """Tests for 0003_expense_date_type (String(10) -> DATE) upgrade, validation guard, and downgrade."""
+
+    def test_0003_migrates_expense_date_to_date_preserves_counts_and_downgrades(self, tmp_path):
+        from datetime import date as py_date
+        from scripts.verify_migration import audit_database, compare_reports
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'date_mig.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, '0002_reconcile_prod_schema')
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                       VALUES (1, 'dateuser', 'date@example.com', 'h', CURRENT_TIMESTAMP, 'avatar_1')"""
+                ))
+                conn.execute(sa.text(
+                    """INSERT INTO expense (id, user_id, date, category, amount, payment_method, created_at)
+                       VALUES
+                       (1, 1, '2024-02-29', 'Food', 100.0, 'UPI', CURRENT_TIMESTAMP),
+                       (2, 1, '2026-01-01', 'Bills', 250.5, 'Cash', CURRENT_TIMESTAMP),
+                       (3, 1, '2026-12-31', 'Travel', 75.25, 'Card', CURRENT_TIMESTAMP)"""
+                ))
+                if is_postgres:
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('expense', 'id'), 3)"""))
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('"user"', 'id'), 1)"""))
+
+            before = audit_database(uri)
+            assert before['unparseable_dates'] == 0
+
+            command.upgrade(cfg, '0003_expense_date_type')
+            insp = sa.inspect(engine)
+            date_col = next(c for c in insp.get_columns('expense') if c['name'] == 'date')
+            assert isinstance(date_col['type'], sa.Date)
+            assert {'ix_expense_user_id', 'ix_expense_date', 'idx_expense_user_date'}.issubset(
+                {i['name'] for i in insp.get_indexes('expense')}
+            )
+            assert insp.get_foreign_keys('expense')[0]['referred_table'] == 'user'
+
+            after_up = audit_database(uri)
+            assert after_up['unparseable_dates'] == 0
+            assert compare_reports(before, after_up) == []
+
+            with engine.connect() as conn:
+                reflected_exp = sa.Table('expense', sa.MetaData(), autoload_with=conn)
+                dates = [
+                    r[0]
+                    for r in conn.execute(sa.select(reflected_exp.c.date).order_by(reflected_exp.c.id.asc()))
+                ]
+                if not is_postgres:
+                    raw_types = [r[0] for r in conn.execute(sa.text('SELECT typeof(date) FROM expense'))]
+                    assert raw_types == ['text', 'text', 'text']
+            assert dates == [py_date(2024, 2, 29), py_date(2026, 1, 1), py_date(2026, 12, 31)]
+
+            command.downgrade(cfg, '0002_reconcile_prod_schema')
+            insp_down = sa.inspect(engine)
+            date_col_down = next(c for c in insp_down.get_columns('expense') if c['name'] == 'date')
+            assert isinstance(date_col_down['type'], sa.String)
+            with engine.connect() as conn:
+                str_dates = [
+                    r[0]
+                    for r in conn.execute(sa.text('SELECT date FROM expense ORDER BY id ASC'))
+                ]
+            assert str_dates == ['2024-02-29', '2026-01-01', '2026-12-31']
+            assert compare_reports(before, audit_database(uri)) == []
+
+            command.upgrade(cfg, '0003_expense_date_type')
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+            engine.dispose()
+
+    def test_0003_aborts_when_unparseable_date_present(self, tmp_path):
+        db_file = tmp_path / 'bad_date_abort.db'
+        uri = f"sqlite:///{db_file.as_posix()}"
+        cfg = _alembic_config(uri)
+        command.upgrade(cfg, '0002_reconcile_prod_schema')
+
+        engine = sa.create_engine(uri)
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                       VALUES (1, 'baduser', 'bad@example.com', 'h', CURRENT_TIMESTAMP, 'avatar_1')"""
+                ))
+                conn.execute(sa.text(
+                    """INSERT INTO expense (id, user_id, date, category, amount, payment_method, created_at)
+                       VALUES (1, 1, '2026-02-30', 'Food', 100.0, 'Cash', CURRENT_TIMESTAMP)"""
+                ))
+
+            with pytest.raises(Exception, match='unparseable'):
+                command.upgrade(cfg, '0003_expense_date_type')
+
+            with engine.connect() as conn:
+                ver = conn.execute(sa.text('SELECT version_num FROM alembic_version')).scalar_one()
+                assert ver == '0002_reconcile_prod_schema'
         finally:
             engine.dispose()

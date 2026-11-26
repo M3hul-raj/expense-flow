@@ -17,7 +17,8 @@ from flask import (
 )
 from models import db, User, Expense
 from utils import (
-    is_logged_in, get_current_year_month, get_user_budget, get_budget_history,
+    is_logged_in, get_current_year_month, get_user_budget,
+    get_budget_history, month_date_range,
 )
 
 logger = logging.getLogger('expenseflow')
@@ -57,20 +58,25 @@ def analytics():
     prev_month = prev_dt.strftime("%Y-%m")
 
     # ── Fetch expenses ─────────────────────────────────────────────────────
+    sel_start, sel_end = month_date_range(selected_month)
+    prev_start, prev_end = month_date_range(prev_month)
+
     month_expenses = Expense.query.filter(
         Expense.user_id == user_id,
-        Expense.date.startswith(selected_month)
+        Expense.date >= sel_start,
+        Expense.date < sel_end,
     ).order_by(Expense.amount.desc()).all()
 
     prev_expenses = Expense.query.filter(
         Expense.user_id == user_id,
-        Expense.date.startswith(prev_month)
+        Expense.date >= prev_start,
+        Expense.date < prev_end,
     ).all()
 
     all_expenses = Expense.query.filter_by(user_id=user_id).all()
 
     # ── Available months for selector ─────────────────────────────────────
-    all_months_raw = sorted(set(e.date[:7] for e in all_expenses), reverse=True)
+    all_months_raw = sorted(set(e.date.strftime('%Y-%m') for e in all_expenses), reverse=True)
     available_months = [
         {'value': m, 'label': datetime.strptime(m, "%Y-%m").strftime("%B %Y")}
         for m in all_months_raw
@@ -101,7 +107,7 @@ def analytics():
     days_in_month = cal_module.monthrange(sel_dt.year, sel_dt.month)[1]
     daily_totals = {}
     for e in month_expenses:
-        day = int(e.date[8:10])
+        day = e.date.day
         daily_totals[day] = daily_totals.get(day, 0) + e.amount
 
     daily_labels = list(range(1, days_in_month + 1))
@@ -260,9 +266,11 @@ def export_pdf():
     month_label = sel_dt.strftime("%B %Y")
 
     # ── Fetch data ───────────────────────────────────────────────────────
+    sel_start, sel_end = month_date_range(selected_month)
     month_expenses = Expense.query.filter(
         Expense.user_id == user_id,
-        Expense.date.startswith(selected_month)
+        Expense.date >= sel_start,
+        Expense.date < sel_end,
     ).order_by(Expense.date.desc()).all()
 
     all_expenses = Expense.query.filter_by(user_id=user_id).order_by(Expense.date.desc()).all()
@@ -452,7 +460,7 @@ def export_pdf():
     for i, e in enumerate(target):
         desc = escape((e.description or '—')[:45])
         exp_rows.append([
-            Paragraph(escape(e.date),                   cell_style),
+            Paragraph(escape(e.date.isoformat()),       cell_style),
             Paragraph(escape(e.category),               cell_style),
             Paragraph(desc,                             cell_style),
             Paragraph(escape(e.payment_method or '—'),  cell_style),

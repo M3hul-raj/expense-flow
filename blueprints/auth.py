@@ -224,12 +224,12 @@ def dashboard():
     current_month_spent = 0.0
 
     for e in expenses_obj:
-        expenses.append([e.date, e.category, str(e.amount), e.description, e.payment_method])
+        expenses.append([e.date.isoformat(), e.category, str(e.amount), e.description, e.payment_method])
 
         total_spent += e.amount
         category_totals[e.category] = category_totals.get(e.category, 0) + e.amount
 
-        month_key = e.date[:7]
+        month_key = e.date.strftime('%Y-%m')
         monthly_totals[month_key] = monthly_totals.get(month_key, 0) + e.amount
 
         if month_key == current_year_month:

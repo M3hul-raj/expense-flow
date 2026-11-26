@@ -214,7 +214,7 @@
                 <tbody>
                     {% for expense in expenses %}
                     <tr data-category="{{ expense[1] }}"
-                        data-description="{{ expense[3] }}"
+                        data-description="{{ expense[3] or '' }}"
                         data-month="{{ expense[0][:7] }}"
                         data-payment="{{ expense[4] if expense[4] else 'N/A' }}"
                         data-amount="{{ '%.2f'|format(expense[2]|float) }}"
@@ -225,7 +225,7 @@
                                 {{ expense[1] }}
                             </span>
                         </td>
-                        <td class="text-secondary small">{{ expense[3][:60] }}{% if expense[3]|length > 60 %}…{% endif %}</td>
+                        <td class="text-secondary small">{{ (expense[3] or '')[:60] }}{% if expense[3] and expense[3]|length > 60 %}…{% endif %}</td>
                         <td class="text-secondary small">{{ expense[4] if expense[4] else '—' }}</td>
                         <td class="text-end fw-bold" style="color:var(--danger);white-space:nowrap;">₹{{ "%.2f"|format(expense[2]|float) }}</td>
                         <td class="text-end" style="white-space:nowrap;">

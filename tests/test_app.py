@@ -13,6 +13,7 @@ Coverage areas
 4.  Budget helpers — get_user_budget / get_budget_history against known I/O
 5.  CSRF — POST without token → 400; POST with valid token → passes CSRF check
 """
+from datetime import date as py_date
 import re
 
 import pytest
@@ -28,13 +29,15 @@ from utils import get_user_budget, get_budget_history, get_current_year_month
 def _make_expense(user_id: int, **overrides) -> Expense:
     """Insert and commit a minimal Expense row; return the ORM object."""
     defaults = dict(
-        date='2026-07-09',
+        date=py_date(2026, 7, 9),
         category='Food',
         amount=100.0,
         description='Test expense',
         payment_method='Cash',
     )
     defaults.update(overrides)
+    if isinstance(defaults.get('date'), str):
+        defaults['date'] = py_date.fromisoformat(defaults['date'])
     e = Expense(user_id=user_id, **defaults)
     db.session.add(e)
     db.session.commit()
@@ -247,8 +250,9 @@ class TestBudgetFunctions:
 
     def test_get_budget_history_status_near_limit(self, app, user):
         ym = get_current_year_month()
+        first_day = py_date.fromisoformat(ym + '-01')
         db.session.add(Budget(user_id=user.id, year_month=ym, amount=1000.0))
-        db.session.add(Expense(user_id=user.id, date=ym + '-01', category='Food',
+        db.session.add(Expense(user_id=user.id, date=first_day, category='Food',
                                amount=950.0, description='x', payment_method='Cash'))
         db.session.commit()
         history = get_budget_history(user.id, months=1)
@@ -256,8 +260,9 @@ class TestBudgetFunctions:
 
     def test_get_budget_history_status_over_budget(self, app, user):
         ym = get_current_year_month()
+        first_day = py_date.fromisoformat(ym + '-01')
         db.session.add(Budget(user_id=user.id, year_month=ym, amount=10.0))
-        db.session.add(Expense(user_id=user.id, date=ym + '-01', category='Food',
+        db.session.add(Expense(user_id=user.id, date=first_day, category='Food',
                                amount=500.0, description='x', payment_method='Cash'))
         db.session.commit()
         history = get_budget_history(user.id, months=1)
@@ -265,8 +270,9 @@ class TestBudgetFunctions:
 
     def test_get_budget_history_remaining_calculation(self, app, user):
         ym = get_current_year_month()
+        first_day = py_date.fromisoformat(ym + '-01')
         db.session.add(Budget(user_id=user.id, year_month=ym, amount=1000.0))
-        db.session.add(Expense(user_id=user.id, date=ym + '-01', category='Food',
+        db.session.add(Expense(user_id=user.id, date=first_day, category='Food',
                                amount=300.0, description='x', payment_method='Cash'))
         db.session.commit()
         history = get_budget_history(user.id, months=1)

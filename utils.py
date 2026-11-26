@@ -5,7 +5,7 @@ Keeping these here avoids duplicating logic across blueprint files and
 prevents circular imports (blueprints import from utils, not from each other).
 """
 import calendar as _calendar
-from datetime import datetime
+from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from flask import session
 from models import db, User, Expense, Budget
@@ -49,11 +49,20 @@ def get_user_budget(user_id, year_month=None):
     return 2000.0  # Default budget
 
 
+def month_date_range(year_month):
+    """Return half-open [start_date, next_month_start_date) bounds for YYYY-MM."""
+    year, month = map(int, year_month.split('-'))
+    start = date(year, month, 1)
+    return start, start + relativedelta(months=1)
+
+
 def get_monthly_spending(user_id, year_month):
     """Return total amount spent by a user in the given YYYY-MM month."""
+    start_date, end_date = month_date_range(year_month)
     expenses = Expense.query.filter(
         Expense.user_id == user_id,
-        Expense.date.startswith(year_month)
+        Expense.date >= start_date,
+        Expense.date < end_date,
     ).all()
     return sum(e.amount for e in expenses)
 

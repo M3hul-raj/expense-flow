@@ -42,7 +42,7 @@ class Expense(db.Model):
     id             = db.Column(db.Integer, primary_key=True)
     # Indexed — most queries filter by user_id and/or date
     user_id        = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
-    date           = db.Column(db.String(10), nullable=False, index=True)  # YYYY-MM-DD
+    date           = db.Column(db.Date, nullable=False, index=True)
     category       = db.Column(db.String(50), nullable=False)
     amount         = db.Column(db.Float, nullable=False)
     description    = db.Column(db.String(255))
