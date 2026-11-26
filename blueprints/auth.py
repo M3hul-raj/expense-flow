@@ -105,7 +105,7 @@ def register():
         new_user.set_password(password)
         db.session.add(new_user)
         db.session.commit()
-        logger.info('New user registered: %s (%s)', username, email)
+        logger.info('New user registered: id=%s', new_user.id)
 
         flash('Registration successful! Please log in.', 'success')
         return redirect(url_for('auth.login'))
@@ -166,15 +166,15 @@ def login():
             session['email'] = user.email
             session['avatar'] = user.avatar or 'avatar_1'
             session['display_name'] = user.display_name
-            logger.info('User logged in: %s', user.username)
+            logger.info('User logged in: id=%s', user.id)
             flash('Login successful!', 'success')
             return redirect(url_for('auth.dashboard'))
 
         # Failed login — log distinct reason internally, return generic response to caller
         if not user:
-            logger.warning('Login attempt for unknown user: %s', username_or_email)
+            logger.warning('Login attempt for unknown user')
         else:
-            logger.warning('Wrong password for user: %s', username_or_email)
+            logger.warning('Wrong password for user: id=%s', user.id)
         flash('Invalid username/email or password.', 'error')
         return redirect(url_for('auth.login'))
 
@@ -186,7 +186,7 @@ def login():
 @auth_bp.route('/logout')
 def logout():
     """Clear the user session and redirect to the landing page."""
-    logger.info('User logged out: %s', session.get('username', 'unknown'))
+    logger.info('User logged out: id=%s', session.get('user_id', 'unknown'))
     session.clear()
     flash('You have been logged out.', 'info')
     return redirect(url_for('auth.index'))

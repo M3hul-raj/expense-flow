@@ -123,6 +123,54 @@ class TestSecretKeyAndSessionConfig:
         with pytest.raises(RuntimeError, match='EXPENSEFLOW_SECRET_KEY'):
             _ = app_module.app
 
+    def test_production_login_set_cookie_header_flags(self, monkeypatch, tmp_path):
+        """Real Set-Cookie header on HTTPS /login in production must include HttpOnly, Secure, SameSite=Lax."""
+        import re
+
+        db_file = tmp_path / 'prod_set_cookie.db'
+        monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', 'prod-secret-key-with-at-least-32-chars!!')
+        monkeypatch.setenv('EXPENSEFLOW_DATABASE_URI', f"sqlite:///{db_file.as_posix()}")
+
+        prod_app = create_app('production')
+        try:
+            with prod_app.app_context():
+                u = User(username='produser', email='produser@example.com')
+                u.set_password('strongpass123')
+                db.session.add(u)
+                db.session.commit()
+
+            c = prod_app.test_client()
+            get_resp = c.get('/login', base_url='https://example.test')
+            assert get_resp.status_code == 200
+            html = get_resp.data.decode('utf-8')
+            match = re.search(
+                r'name=["\']csrf_token["\'][^>]+value=["\']([^"\']+)["\']'
+                r'|value=["\']([^"\']+)["\'][^>]+name=["\']csrf_token["\']',
+                html,
+            )
+            assert match
+            token = match.group(1) or match.group(2)
+
+            post_resp = c.post(
+                '/login',
+                base_url='https://example.test',
+                headers={'Referer': 'https://example.test/login'},
+                data={'username': 'produser', 'password': 'strongpass123', 'csrf_token': token},
+                follow_redirects=False,
+            )
+            assert post_resp.status_code == 302
+            set_cookies = post_resp.headers.getlist('Set-Cookie')
+            session_cookies = [h for h in set_cookies if h.startswith('session=')]
+            assert len(session_cookies) == 1
+            header = session_cookies[0]
+            attrs = {part.strip().lower() for part in header.split(';')[1:]}
+            assert 'httponly' in attrs
+            assert 'secure' in attrs
+            assert 'samesite=lax' in attrs
+        finally:
+            with prod_app.app_context():
+                db.engine.dispose()
+
 
 class TestLoginEnumeration:
     """Tests ensuring /login does not reveal whether an account exists."""
@@ -461,3 +509,176 @@ class TestDashboardRecentTransactions:
         assert 'Oldest-1' not in html
         assert 'Oldest-2' not in html
         assert html.index('Recent-7') < html.index('Recent-6') < html.index('Recent-5')
+
+
+class TestDashboardAndServiceWorker:
+    """Tests for dashboard asset 404 removal and sw.js fetch resilience."""
+
+    def test_dashboard_does_not_reference_missing_chart_css(self, auth_client):
+        resp = auth_client.get('/dashboard')
+        assert resp.status_code == 200
+        assert b'chart.umd.min.css' not in resp.data
+
+    def test_sw_js_every_fetch_branch_resolves_to_valid_response_when_fetch_rejects(
+        self, client
+    ):
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which('node')
+        if not node:
+            pytest.skip('Node.js not available to execute sw.js')
+
+        sw_resp = client.get('/sw.js')
+        assert sw_resp.status_code == 200
+        sw_code = sw_resp.data.decode('utf-8')
+
+        harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const swCode = fs.readFileSync(0, 'utf8');
+
+class FakeResponse {
+  constructor(body = '', init = {}) {
+    this.body = body;
+    this.status = init.status ?? 200;
+    this.statusText = init.statusText ?? 'OK';
+    this.ok = this.status >= 200 && this.status < 300;
+    this.headers = init.headers || {};
+  }
+  clone() { return new FakeResponse(this.body, { status: this.status, statusText: this.statusText, headers: this.headers }); }
+}
+
+const listeners = {};
+const cacheStore = new Map([['/offline', new FakeResponse('OFFLINE_PAGE', { status: 200 })]]);
+
+const context = {
+  URL,
+  Response: FakeResponse,
+  console: { log() {}, warn() {}, error() {} },
+  self: {
+    addEventListener(type, fn) { listeners[type] = fn; },
+    skipWaiting() {},
+    clients: { claim() {} },
+  },
+  caches: {
+    async open() { return { async addAll() {}, async put() {} }; },
+    async keys() { return []; },
+    async delete() { return true; },
+    async match(req) {
+      const key = typeof req === 'string' ? req : new URL(req.url).pathname;
+      return cacheStore.get(key);
+    },
+  },
+  fetch: async () => { throw new TypeError('Failed to fetch'); },
+};
+
+vm.runInNewContext(swCode, context);
+
+async function dispatchFetch(url, { mode = 'cors', destination = '', accept = '*/*' } = {}) {
+  let responded = null;
+  const event = {
+    request: {
+      url,
+      method: 'GET',
+      mode,
+      destination,
+      headers: { get(name) { return name.toLowerCase() === 'accept' ? accept : null; } },
+    },
+    respondWith(promise) { responded = promise; },
+  };
+  listeners.fetch(event);
+  const res = await responded;
+  if (!(res instanceof FakeResponse)) {
+    throw new Error(`Invalid non-Response returned for ${url}: ${String(res)}`);
+  }
+  return { status: res.status, body: res.body };
+}
+
+(async () => {
+  const results = {
+    staticMiss: await dispatchFetch('http://127.0.0.1/static/missing.css'),
+    navOffline: await dispatchFetch('http://127.0.0.1/dashboard', { mode: 'navigate', destination: 'document', accept: 'text/html' }),
+    nonNavDashboard: await dispatchFetch('http://127.0.0.1/dashboard', { mode: 'cors', accept: '*/*' }),
+    manifestMiss: await dispatchFetch('http://127.0.0.1/manifest.json', { mode: 'cors', accept: '*/*' }),
+  };
+  cacheStore.clear();
+  results.navOfflineNoCache = await dispatchFetch('http://127.0.0.1/dashboard', { mode: 'navigate', destination: 'document', accept: 'text/html' });
+  console.log(JSON.stringify(results));
+})().catch((err) => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(1);
+});
+"""
+        proc = subprocess.run(
+            [node, '-e', harness],
+            input=sw_code,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert proc.returncode == 0, f"sw.js rejected under offline fetch:\n{proc.stderr}"
+        results = json.loads(proc.stdout)
+        assert results['staticMiss']['status'] >= 400
+        assert results['navOffline']['body'] == 'OFFLINE_PAGE'
+        assert results['nonNavDashboard']['status'] >= 400
+        assert results['manifestMiss']['status'] >= 400
+        assert results['navOfflineNoCache']['status'] == 503
+
+
+class TestLoggingPrivacy:
+    """Tests ensuring auth logs never contain email addresses or raw submitted identifiers."""
+
+    def test_register_logs_user_id_only(self, client, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO, logger='expenseflow'):
+            resp = client.post(
+                '/register',
+                data={
+                    'username': 'priv_user',
+                    'email': 'priv_secret@example.com',
+                    'password': 'password123',
+                    'confirm_password': 'password123',
+                },
+                follow_redirects=False,
+            )
+        assert resp.status_code == 302
+        created = User.query.filter_by(username='priv_user').first()
+        assert created is not None
+        assert f'New user registered: id={created.id}' in caplog.text
+        assert 'priv_secret@example.com' not in caplog.text
+        assert 'priv_user' not in caplog.text
+
+    def test_login_and_logout_never_log_emails_or_submitted_identifiers(
+        self, client, user, caplog
+    ):
+        import logging
+
+        unknown_ident = 'mistyped_secret_identifier@example.com'
+        with caplog.at_level(logging.INFO, logger='expenseflow'):
+            client.post(
+                '/login',
+                data={'username': unknown_ident, 'password': 'wrong'},
+                follow_redirects=False,
+            )
+            client.post(
+                '/login',
+                data={'username': user.email, 'password': 'wrong'},
+                follow_redirects=False,
+            )
+            client.post(
+                '/login',
+                data={'username': user.email, 'password': 'password123'},
+                follow_redirects=False,
+            )
+            client.get('/logout', follow_redirects=False)
+
+        assert 'Login attempt for unknown user' in caplog.text
+        assert f'Wrong password for user: id={user.id}' in caplog.text
+        assert f'User logged in: id={user.id}' in caplog.text
+        assert f'User logged out: id={user.id}' in caplog.text
+        assert unknown_ident not in caplog.text
+        assert user.email not in caplog.text
+        assert user.username not in caplog.text

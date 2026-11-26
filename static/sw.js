@@ -1,9 +1,10 @@
-// ExpenseFlow Service Worker — v3
-const CACHE_NAME = 'expenseflow-v3';
+// ExpenseFlow Service Worker — v4
+const CACHE_NAME = 'expenseflow-v4';
 
 // Static assets to pre-cache on install
 const PRE_CACHE = [
   '/static/main.css',
+  '/manifest.json',
   '/offline',
   'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css',
   'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js',
@@ -52,6 +53,7 @@ self.addEventListener('fetch', (event) => {
   // Strategy 1: Cache-first for static assets (CSS, JS, fonts, images, icons)
   if (
     url.pathname.startsWith('/static/') ||
+    url.pathname === '/manifest.json' ||
     url.hostname === 'cdn.jsdelivr.net' ||
     url.hostname === 'cdnjs.cloudflare.com' ||
     url.hostname === 'fonts.googleapis.com' ||
@@ -59,13 +61,16 @@ self.addEventListener('fetch', (event) => {
   ) {
     event.respondWith(
       caches.match(event.request).then((cached) => {
-        return cached || fetch(event.request).then((response) => {
-          if (response && response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          }
-          return response;
-        });
+        if (cached) return cached;
+        return fetch(event.request)
+          .then((response) => {
+            if (response && response.ok) {
+              const clone = response.clone();
+              caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+            }
+            return response;
+          })
+          .catch(() => new Response('', { status: 503, statusText: 'Service Unavailable' }));
       })
     );
     return;
@@ -74,14 +79,29 @@ self.addEventListener('fetch', (event) => {
   // Strategy 2: Network-only for HTML pages (never cache authenticated pages)
   if (
     event.request.mode === 'navigate' ||
+    event.request.destination === 'document' ||
     event.request.headers.get('accept')?.includes('text/html')
   ) {
     event.respondWith(
-      fetch(event.request).catch(() => caches.match('/offline'))
+      fetch(event.request).catch(() =>
+        caches.match('/offline').then(
+          (cached) =>
+            cached ||
+            new Response('You are offline.', {
+              status: 503,
+              statusText: 'Service Unavailable',
+              headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+            })
+        )
+      )
     );
     return;
   }
 
   // Default: network-only so dynamic endpoints or exports are never cached
-  event.respondWith(fetch(event.request));
+  event.respondWith(
+    fetch(event.request).catch(
+      () => new Response('', { status: 503, statusText: 'Service Unavailable' })
+    )
+  );
 });
