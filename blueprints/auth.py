@@ -150,15 +150,13 @@ def login():
             flash('Login successful!', 'success')
             return redirect(url_for('auth.dashboard'))
 
-        # Failed login — log and flash appropriate message
+        # Failed login — log distinct reason internally, return generic response to caller
         if not user:
             logger.warning('Login attempt for unknown user: %s', username_or_email)
-            flash('User does not exist. Please sign up first!', 'error')
-            return redirect(url_for('auth.register'))
         else:
             logger.warning('Wrong password for user: %s', username_or_email)
-            flash('Invalid password. Please try again!', 'error')
-            return redirect(url_for('auth.login'))
+        flash('Invalid username/email or password.', 'error')
+        return redirect(url_for('auth.login'))
 
     return render_template('login.html')
 

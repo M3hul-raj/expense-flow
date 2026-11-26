@@ -103,3 +103,44 @@ class TestSecretKeyAndSessionConfig:
 
         with pytest.raises(RuntimeError, match='EXPENSEFLOW_SECRET_KEY'):
             _ = app_module.app
+
+
+class TestLoginEnumeration:
+    """Tests ensuring /login does not reveal whether an account exists."""
+
+    def test_unknown_user_and_wrong_password_return_identical_response(
+        self, client, user
+    ):
+        """Both unknown user and wrong password must redirect to /login with the same error."""
+        resp_unknown = client.post(
+            '/login',
+            data={'username': 'no_such_user', 'password': 'wrongpassword'},
+            follow_redirects=False,
+        )
+        resp_wrong_pw = client.post(
+            '/login',
+            data={'username': user.username, 'password': 'wrongpassword'},
+            follow_redirects=False,
+        )
+
+        assert resp_unknown.status_code == 302
+        assert resp_wrong_pw.status_code == 302
+        assert resp_unknown.headers['Location'].endswith('/login')
+        assert resp_wrong_pw.headers['Location'].endswith('/login')
+
+        page_unknown = client.post(
+            '/login',
+            data={'username': 'no_such_user', 'password': 'wrongpassword'},
+            follow_redirects=True,
+        )
+        page_wrong_pw = client.post(
+            '/login',
+            data={'username': user.username, 'password': 'wrongpassword'},
+            follow_redirects=True,
+        )
+
+        assert b'Invalid username/email or password.' in page_unknown.data
+        assert b'Invalid username/email or password.' in page_wrong_pw.data
+        assert b'User does not exist' not in page_unknown.data
+        assert b'Invalid password' not in page_wrong_pw.data
+
