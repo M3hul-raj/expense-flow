@@ -9,6 +9,7 @@ import calendar as cal_module
 import io
 import logging
 from datetime import datetime
+from xml.sax.saxutils import escape
 from dateutil.relativedelta import relativedelta
 from flask import (
     Blueprint, render_template, request, redirect,
@@ -349,9 +350,9 @@ def export_pdf():
     # ── 2. Report title + user info ──────────────────────────────────────
     story.append(Paragraph(f"Expense Report — {month_label}", section_style))
     info_data = [[
-        Paragraph(f"<b>Account:</b> {user.username}", body_style),
-        Paragraph(f"<b>Email:</b> {user.email}", body_style),
-        Paragraph(f"<b>Period:</b> {month_label}", body_style),
+        Paragraph(f"<b>Account:</b> {escape(user.username)}", body_style),
+        Paragraph(f"<b>Email:</b> {escape(user.email)}", body_style),
+        Paragraph(f"<b>Period:</b> {escape(month_label)}", body_style),
     ]]
     info_table = Table(info_data, colWidths=[col_w/3]*3)
     info_table.setStyle(TableStyle([
@@ -411,7 +412,7 @@ def export_pdf():
             pct = (amt / total_spent * 100) if total_spent > 0 else 0
             bg = ROW_ALT if i % 2 == 0 else WHITE
             cat_rows.append([
-                Paragraph(cat,                    cell_style),
+                Paragraph(escape(cat),            cell_style),
                 Paragraph(f"₹{amt:,.2f}",         cell_bold),
                 Paragraph(f"{pct:.1f}%",           cell_style),
             ])
@@ -449,13 +450,13 @@ def export_pdf():
     ]
     exp_rows = [exp_head]
     for i, e in enumerate(target):
-        desc = (e.description or '—')[:45]
+        desc = escape((e.description or '—')[:45])
         exp_rows.append([
-            Paragraph(e.date,                   cell_style),
-            Paragraph(e.category,               cell_style),
-            Paragraph(desc,                     cell_style),
-            Paragraph(e.payment_method or '—',  cell_style),
-            Paragraph(f"₹{e.amount:,.2f}",      cell_right),
+            Paragraph(escape(e.date),                   cell_style),
+            Paragraph(escape(e.category),               cell_style),
+            Paragraph(desc,                             cell_style),
+            Paragraph(escape(e.payment_method or '—'),  cell_style),
+            Paragraph(f"₹{e.amount:,.2f}",              cell_right),
         ])
 
     # Total row

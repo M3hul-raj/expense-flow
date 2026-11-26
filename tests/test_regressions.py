@@ -373,4 +373,39 @@ class TestSetBudgetValidation:
         assert db.session.get(User, user.id).recurring_budget == 6000.0
 
 
+class TestPdfExportEscaping:
+    """Tests ensuring ReportLab PDF export escapes user-supplied XML characters."""
+
+    def test_pdf_export_escapes_xml_chars_in_description_and_email(
+        self, auth_client, user
+    ):
+        from models import Expense
+
+        u = db.session.get(User, user.id)
+        u.email = 'alice&bob@test.com'
+        db.session.add(Expense(
+            user_id=user.id,
+            date='2026-07-10',
+            category='Shopping',
+            amount=499.0,
+            description='Coffee <b>bold & <online> snacks',
+            payment_method='UPI',
+        ))
+        db.session.add(Expense(
+            user_id=user.id,
+            date='2026-07-11',
+            category='Food',
+            amount=120.0,
+            description=('A' * 44) + '&Z',
+            payment_method='Cash',
+        ))
+        db.session.commit()
+
+        resp = auth_client.get('/export/pdf?month=2026-07')
+        assert resp.status_code == 200
+        assert resp.headers['Content-Type'] == 'application/pdf'
+        assert resp.data.startswith(b'%PDF-')
+
+
+
 
