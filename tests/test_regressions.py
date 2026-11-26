@@ -123,6 +123,54 @@ class TestSecretKeyAndSessionConfig:
         with pytest.raises(RuntimeError, match='EXPENSEFLOW_SECRET_KEY'):
             _ = app_module.app
 
+    def test_production_login_set_cookie_header_flags(self, monkeypatch, tmp_path):
+        """Real Set-Cookie header on HTTPS /login in production must include HttpOnly, Secure, SameSite=Lax."""
+        import re
+
+        db_file = tmp_path / 'prod_set_cookie.db'
+        monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', 'prod-secret-key-with-at-least-32-chars!!')
+        monkeypatch.setenv('EXPENSEFLOW_DATABASE_URI', f"sqlite:///{db_file.as_posix()}")
+
+        prod_app = create_app('production')
+        try:
+            with prod_app.app_context():
+                u = User(username='produser', email='produser@example.com')
+                u.set_password('strongpass123')
+                db.session.add(u)
+                db.session.commit()
+
+            c = prod_app.test_client()
+            get_resp = c.get('/login', base_url='https://example.test')
+            assert get_resp.status_code == 200
+            html = get_resp.data.decode('utf-8')
+            match = re.search(
+                r'name=["\']csrf_token["\'][^>]+value=["\']([^"\']+)["\']'
+                r'|value=["\']([^"\']+)["\'][^>]+name=["\']csrf_token["\']',
+                html,
+            )
+            assert match
+            token = match.group(1) or match.group(2)
+
+            post_resp = c.post(
+                '/login',
+                base_url='https://example.test',
+                headers={'Referer': 'https://example.test/login'},
+                data={'username': 'produser', 'password': 'strongpass123', 'csrf_token': token},
+                follow_redirects=False,
+            )
+            assert post_resp.status_code == 302
+            set_cookies = post_resp.headers.getlist('Set-Cookie')
+            session_cookies = [h for h in set_cookies if h.startswith('session=')]
+            assert len(session_cookies) == 1
+            header = session_cookies[0]
+            attrs = {part.strip().lower() for part in header.split(';')[1:]}
+            assert 'httponly' in attrs
+            assert 'secure' in attrs
+            assert 'samesite=lax' in attrs
+        finally:
+            with prod_app.app_context():
+                db.engine.dispose()
+
 
 class TestLoginEnumeration:
     """Tests ensuring /login does not reveal whether an account exists."""
