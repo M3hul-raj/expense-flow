@@ -83,7 +83,10 @@ class TestSecretKeyAndSessionConfig:
             assert prod_app.config['SESSION_COOKIE_HTTPONLY'] is True
             assert prod_app.config['SESSION_COOKIE_SAMESITE'] == 'Lax'
             assert prod_app.config['SQLALCHEMY_DATABASE_URI'] == expected_uri
-            assert db_file.exists()
+            assert not db_file.exists()
+            with prod_app.app_context():
+                db.create_all()
+                assert db_file.exists()
         finally:
             with prod_app.app_context():
                 db.engine.dispose()
@@ -134,6 +137,7 @@ class TestSecretKeyAndSessionConfig:
         prod_app = create_app('production')
         try:
             with prod_app.app_context():
+                db.create_all()
                 u = User(username='produser', email='produser@example.com')
                 u.set_password('strongpass123')
                 db.session.add(u)
@@ -741,7 +745,9 @@ class TestDatabaseConfig:
         override_app = create_app('testing', database_uri=override_uri)
         try:
             assert override_app.config['SQLALCHEMY_DATABASE_URI'] == override_uri
-            assert override_file.exists()
+            with override_app.app_context():
+                db.create_all()
+                assert override_file.exists()
         finally:
             with override_app.app_context():
                 db.engine.dispose()
