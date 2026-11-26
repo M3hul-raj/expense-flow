@@ -66,7 +66,8 @@ class TestAlembicBaseline:
             assert {'user', 'expense', 'budget', 'alembic_version'}.issubset(set(insp.get_table_names()))
 
             expense_indexes = {idx['name'] for idx in insp.get_indexes('expense')}
-            assert {'ix_expense_user_id', 'ix_expense_date', 'idx_expense_user_date'}.issubset(expense_indexes)
+            assert {'ix_expense_user_id', 'ix_expense_date', 'idx_expense_user_date_id'}.issubset(expense_indexes)
+            assert 'idx_expense_user_date' not in expense_indexes
 
             budget_uqs = {uq['name'] for uq in insp.get_unique_constraints('budget')}
             assert 'unique_user_month_budget' in budget_uqs
@@ -329,6 +330,7 @@ class TestSchemaReconciliation:
                 ('email',),
             }
             assert len(insp.get_unique_constraints('user')) == 2
+            command.upgrade(cfg, 'head')
             assert self._unexplained_diffs(engine) == []
 
             with engine.connect() as conn:
@@ -356,22 +358,21 @@ class TestSchemaReconciliation:
             command.upgrade(cfg, '0001_baseline')
             command.upgrade(cfg, '0002_reconcile_prod_schema')
 
-            with engine.connect() as conn:
-                ctx = MigrationContext.configure(
-                    conn, opts={'compare_type': True, 'compare_server_default': True}
-                )
-                assert compare_metadata(ctx, db.metadata) == []
-                insp = sa.inspect(conn)
-                user_indexes = insp.get_indexes('user')
-                assert {i['name'] for i in user_indexes} == {'ix_user_username', 'ix_user_email'}
-                assert len(user_indexes) == 2
+            insp = sa.inspect(engine)
+            avatar_col = next(c for c in insp.get_columns('user') if c['name'] == 'avatar')
+            assert avatar_col.get('default') is not None
+            user_indexes = insp.get_indexes('user')
+            assert {i['name'] for i in user_indexes} == {'ix_user_username', 'ix_user_email'}
+            assert len(user_indexes) == 2
 
             command.downgrade(cfg, '0001_baseline')
             insp_down = sa.inspect(engine)
+            assert next(c for c in insp_down.get_columns('user') if c['name'] == 'avatar').get('default') is None
             assert 'idx_expense_user_date' in {i['name'] for i in insp_down.get_indexes('expense')}
             assert 'ix_budget_user_id' in {i['name'] for i in insp_down.get_indexes('budget')}
 
             command.upgrade(cfg, '0002_reconcile_prod_schema')
+            command.upgrade(cfg, 'head')
             with engine.connect() as conn:
                 ctx = MigrationContext.configure(
                     conn, opts={'compare_type': True, 'compare_server_default': True}
@@ -418,4 +419,263 @@ class TestSchemaReconciliation:
                 assert list(conn.execute(sa.text('PRAGMA foreign_key_check'))) == []
                 assert conn.execute(sa.text('SELECT COUNT(*) FROM expense')).scalar_one() == 1
         finally:
+            engine.dispose()
+
+
+class TestExpenseDateMigration:
+    """Tests for 0003_expense_date_type (String(10) -> DATE) upgrade, validation guard, and downgrade."""
+
+    def test_0003_migrates_expense_date_to_date_preserves_counts_and_downgrades(self, tmp_path):
+        from datetime import date as py_date
+        from scripts.verify_migration import audit_database, compare_reports
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'date_mig.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, '0002_reconcile_prod_schema')
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                       VALUES (1, 'dateuser', 'date@example.com', 'h', CURRENT_TIMESTAMP, 'avatar_1')"""
+                ))
+                conn.execute(sa.text(
+                    """INSERT INTO expense (id, user_id, date, category, amount, payment_method, created_at)
+                       VALUES
+                       (1, 1, '2024-02-29', 'Food', 100.0, 'UPI', CURRENT_TIMESTAMP),
+                       (2, 1, '2026-01-01', 'Bills', 250.5, 'Cash', CURRENT_TIMESTAMP),
+                       (3, 1, '2026-12-31', 'Travel', 75.25, 'Card', CURRENT_TIMESTAMP)"""
+                ))
+                if is_postgres:
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('expense', 'id'), 3)"""))
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('"user"', 'id'), 1)"""))
+
+            before = audit_database(uri)
+            assert before['unparseable_dates'] == 0
+
+            command.upgrade(cfg, '0003_expense_date_type')
+            insp = sa.inspect(engine)
+            date_col = next(c for c in insp.get_columns('expense') if c['name'] == 'date')
+            assert isinstance(date_col['type'], sa.Date)
+            assert {'ix_expense_user_id', 'ix_expense_date', 'idx_expense_user_date'}.issubset(
+                {i['name'] for i in insp.get_indexes('expense')}
+            )
+            assert insp.get_foreign_keys('expense')[0]['referred_table'] == 'user'
+
+            after_up = audit_database(uri)
+            assert after_up['unparseable_dates'] == 0
+            assert compare_reports(before, after_up) == []
+
+            with engine.connect() as conn:
+                reflected_exp = sa.Table('expense', sa.MetaData(), autoload_with=conn)
+                dates = [
+                    r[0]
+                    for r in conn.execute(sa.select(reflected_exp.c.date).order_by(reflected_exp.c.id.asc()))
+                ]
+                if not is_postgres:
+                    raw_types = [r[0] for r in conn.execute(sa.text('SELECT typeof(date) FROM expense'))]
+                    assert raw_types == ['text', 'text', 'text']
+            assert dates == [py_date(2024, 2, 29), py_date(2026, 1, 1), py_date(2026, 12, 31)]
+
+            command.downgrade(cfg, '0002_reconcile_prod_schema')
+            insp_down = sa.inspect(engine)
+            date_col_down = next(c for c in insp_down.get_columns('expense') if c['name'] == 'date')
+            assert isinstance(date_col_down['type'], sa.String)
+            with engine.connect() as conn:
+                str_dates = [
+                    r[0]
+                    for r in conn.execute(sa.text('SELECT date FROM expense ORDER BY id ASC'))
+                ]
+            assert str_dates == ['2024-02-29', '2026-01-01', '2026-12-31']
+            assert compare_reports(before, audit_database(uri)) == []
+
+            command.upgrade(cfg, '0003_expense_date_type')
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+            engine.dispose()
+
+    def test_0003_aborts_when_unparseable_date_present(self, tmp_path):
+        db_file = tmp_path / 'bad_date_abort.db'
+        uri = f"sqlite:///{db_file.as_posix()}"
+        cfg = _alembic_config(uri)
+        command.upgrade(cfg, '0002_reconcile_prod_schema')
+
+        engine = sa.create_engine(uri)
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                       VALUES (1, 'baduser', 'bad@example.com', 'h', CURRENT_TIMESTAMP, 'avatar_1')"""
+                ))
+                conn.execute(sa.text(
+                    """INSERT INTO expense (id, user_id, date, category, amount, payment_method, created_at)
+                       VALUES (1, 1, '2026-02-30', 'Food', 100.0, 'Cash', CURRENT_TIMESTAMP)"""
+                ))
+
+            with pytest.raises(Exception, match='unparseable'):
+                command.upgrade(cfg, '0003_expense_date_type')
+
+            with engine.connect() as conn:
+                ver = conn.execute(sa.text('SELECT version_num FROM alembic_version')).scalar_one()
+                assert ver == '0002_reconcile_prod_schema'
+        finally:
+            engine.dispose()
+
+
+class TestExpenseOrderingIndex:
+    """Tests for 0004_expense_ordering_index replacing idx_expense_user_date and EXPLAIN plans."""
+
+    def test_0004_replaces_expense_date_index_with_user_date_id_and_downgrades(self, tmp_path):
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'ord_idx.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, '0003_expense_date_type')
+            insp_before = sa.inspect(engine)
+            names_before = {i['name'] for i in insp_before.get_indexes('expense')}
+            assert 'idx_expense_user_date' in names_before
+            assert 'idx_expense_user_date_id' not in names_before
+
+            command.upgrade(cfg, '0004_expense_ordering_index')
+            insp_up = sa.inspect(engine)
+            indexes_up = {i['name']: i for i in insp_up.get_indexes('expense')}
+            assert 'idx_expense_user_date_id' in indexes_up
+            assert 'idx_expense_user_date' not in indexes_up
+            assert indexes_up['idx_expense_user_date_id']['column_names'] == ['user_id', 'date', 'id']
+            assert not indexes_up['idx_expense_user_date_id']['unique']
+            assert {'ix_expense_user_id', 'ix_expense_date'}.issubset(indexes_up.keys())
+
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                assert compare_metadata(ctx, db.metadata) == []
+
+            command.downgrade(cfg, '0003_expense_date_type')
+            insp_down = sa.inspect(engine)
+            indexes_down = {i['name']: i for i in insp_down.get_indexes('expense')}
+            assert 'idx_expense_user_date' in indexes_down
+            assert 'idx_expense_user_date_id' not in indexes_down
+            assert indexes_down['idx_expense_user_date']['column_names'] == ['user_id', 'date']
+
+            command.upgrade(cfg, '0004_expense_ordering_index')
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+            engine.dispose()
+
+    def test_0004_explain_plans_use_ordering_index_without_sort(self, tmp_path):
+        from datetime import date as py_date, timedelta
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'explain_idx.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, 'head')
+
+            user_rows = [
+                {
+                    'id': u,
+                    'username': f'planuser{u}',
+                    'email': f'plan{u}@example.com',
+                    'password_hash': 'h',
+                    'avatar': 'avatar_1',
+                }
+                for u in range(1, 21)
+            ]
+            base_day = py_date(2026, 1, 1)
+            exp_rows = [
+                {
+                    'user_id': (i % 20) + 1,
+                    'date': (
+                        base_day + timedelta(days=(i // 40))
+                        if is_postgres
+                        else (base_day + timedelta(days=(i // 40))).isoformat()
+                    ),
+                    'category': 'Food',
+                    'amount': 50.0 + (i % 10),
+                    'description': f'row {i}',
+                    'payment_method': 'UPI',
+                }
+                for i in range(1000)
+            ]
+
+            with engine.begin() as conn:
+                conn.execute(
+                    sa.text(
+                        """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                           VALUES (:id, :username, :email, :password_hash, CURRENT_TIMESTAMP, :avatar)"""
+                    ),
+                    user_rows,
+                )
+                conn.execute(
+                    sa.text(
+                        """INSERT INTO expense (user_id, date, category, amount, description, payment_method, created_at)
+                           VALUES (:user_id, :date, :category, :amount, :description, :payment_method, CURRENT_TIMESTAMP)"""
+                    ),
+                    exp_rows,
+                )
+                conn.execute(sa.text('ANALYZE expense'))
+
+            query_full = (
+                'SELECT id, user_id, date, category, amount, description, payment_method, created_at '
+                'FROM expense WHERE user_id = :uid ORDER BY date DESC, id DESC'
+            )
+            query_limit = f'{query_full} LIMIT 5'
+            query_month_limit = (
+                'SELECT id, user_id, date, category, amount, description, payment_method, created_at '
+                'FROM expense WHERE user_id = :uid AND date >= :start_d AND date < :end_d '
+                'ORDER BY date DESC, id DESC LIMIT 10'
+            )
+            start_d = py_date(2026, 1, 1) if is_postgres else '2026-01-01'
+            end_d = py_date(2026, 2, 1) if is_postgres else '2026-02-01'
+
+            with engine.connect() as conn:
+                if is_postgres:
+                    for sql, params in (
+                        (query_limit, {'uid': 1}),
+                        (query_month_limit, {'uid': 1, 'start_d': start_d, 'end_d': end_d}),
+                    ):
+                        plan_lines = [
+                            r[0]
+                            for r in conn.execute(sa.text(f'EXPLAIN (FORMAT TEXT) {sql}'), params)
+                        ]
+                        plan_text = '\n'.join(plan_lines)
+                        assert 'Index Scan Backward using idx_expense_user_date_id' in plan_text, plan_text
+                        assert not any('Sort' in line for line in plan_lines), plan_text
+                else:
+                    for sql, params in (
+                        (query_full, {'uid': 1}),
+                        (query_limit, {'uid': 1}),
+                        (query_month_limit, {'uid': 1, 'start_d': start_d, 'end_d': end_d}),
+                    ):
+                        plan_rows = [
+                            r[-1]
+                            for r in conn.execute(sa.text(f'EXPLAIN QUERY PLAN {sql}'), params)
+                        ]
+                        plan_text = '\n'.join(plan_rows)
+                        assert 'idx_expense_user_date_id' in plan_text, plan_text
+                        assert 'USE TEMP B-TREE FOR ORDER BY' not in plan_text, plan_text
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
             engine.dispose()

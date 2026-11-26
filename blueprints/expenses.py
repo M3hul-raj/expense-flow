@@ -16,12 +16,25 @@ from flask import (
 from models import db, Expense
 from utils import (
     is_logged_in, get_current_year_month, get_user_budget,
-    get_user_expenses_sorted, TIPS,
+    get_monthly_spending, get_user_expenses_sorted, TIPS,
 )
 
 logger = logging.getLogger('expenseflow')
 
 expenses_bp = Blueprint('expenses', __name__)
+
+
+def _parse_expense_date(raw_date):
+    """Parse and validate an ASCII YYYY-MM-DD non-future expense date."""
+    if not raw_date or not _re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', raw_date):
+        return None, 'Please select a valid date.'
+    try:
+        parsed = datetime.strptime(raw_date, '%Y-%m-%d').date()
+    except ValueError:
+        return None, 'Please select a valid date.'
+    if parsed > datetime.now().date():
+        return None, 'Expense date cannot be in the future.'
+    return parsed, None
 
 # ── Shared validation sets ────────────────────────────────────────────────────
 VALID_CATEGORIES = {
@@ -55,17 +68,9 @@ def add_expense():
         payment_method  = request.form.get('payment_method', '').strip()
 
         # ── Server-side validation ────────────────────────────────────────
-        if not date or not _re.match(r'\d{4}-\d{2}-\d{2}', date):
-            flash('Please select a valid date.', 'error')
-            return redirect(url_for('expenses.add_expense'))
-        # Reject future dates
-        try:
-            expense_date = datetime.strptime(date, '%Y-%m-%d').date()
-            if expense_date > datetime.now().date():
-                flash('Expense date cannot be in the future.', 'error')
-                return redirect(url_for('expenses.add_expense'))
-        except ValueError:
-            flash('Please select a valid date.', 'error')
+        expense_date, date_err = _parse_expense_date(date)
+        if date_err:
+            flash(date_err, 'error')
             return redirect(url_for('expenses.add_expense'))
         if category not in VALID_CATEGORIES:
             flash('Please select a valid category.', 'error')
@@ -93,7 +98,7 @@ def add_expense():
         user_id = session['user_id']
         new_expense = Expense(
             user_id=user_id,
-            date=date,
+            date=expense_date,
             category=category,
             amount=amount,
             description=description,
@@ -110,12 +115,7 @@ def add_expense():
     user_id = session['user_id']
 
     current_ym = get_current_year_month()
-    month_spent = sum(
-        e.amount for e in Expense.query.filter(
-            Expense.user_id == user_id,
-            Expense.date.startswith(current_ym)
-        ).all()
-    )
+    month_spent = get_monthly_spending(user_id, current_ym)
     add_budget = get_user_budget(user_id, current_ym)
     add_budget_remaining = add_budget - month_spent
     add_budget_pct = (month_spent / add_budget * 100) if add_budget > 0 else 0
@@ -152,17 +152,17 @@ def view_expense():
     payment_method_totals = {}
 
     for e in expenses_obj:
-        expenses.append([e.date, e.category, str(e.amount), e.description, e.payment_method, e.id])
+        expenses.append([e.date.isoformat(), e.category, str(e.amount), e.description or '', e.payment_method, e.id])
 
         total_spent += e.amount
         category_totals[e.category] = category_totals.get(e.category, 0) + e.amount
         payment_method_totals[e.payment_method] = payment_method_totals.get(e.payment_method, 0) + e.amount
 
-        month_key = e.date[:7]
+        month_key = e.date.strftime('%Y-%m')
         monthly_totals[month_key] = monthly_totals.get(month_key, 0) + e.amount
 
     if expenses_obj:
-        first_date = datetime.strptime(min(e.date for e in expenses_obj), '%Y-%m-%d').date()
+        first_date = min(e.date for e in expenses_obj)
         days_active = max(1, (datetime.now().date() - first_date).days + 1)
         avg_daily_spend = total_spent / days_active
     else:
@@ -213,15 +213,9 @@ def edit_expense(expense_id):
         description    = request.form.get('description', '').strip()
         payment_method = request.form.get('payment_method', '').strip()
 
-        if not date or not _re.match(r'\d{4}-\d{2}-\d{2}', date):
-            flash('Please select a valid date.', 'error')
-            return redirect(url_for('expenses.edit_expense', expense_id=expense_id))
-        try:
-            if datetime.strptime(date, '%Y-%m-%d').date() > datetime.now().date():
-                flash('Expense date cannot be in the future.', 'error')
-                return redirect(url_for('expenses.edit_expense', expense_id=expense_id))
-        except ValueError:
-            flash('Please select a valid date.', 'error')
+        expense_date, date_err = _parse_expense_date(date)
+        if date_err:
+            flash(date_err, 'error')
             return redirect(url_for('expenses.edit_expense', expense_id=expense_id))
         if category not in VALID_CATEGORIES:
             flash('Please select a valid category.', 'error')
@@ -238,7 +232,7 @@ def edit_expense(expense_id):
             return redirect(url_for('expenses.edit_expense', expense_id=expense_id))
         description = description[:255]
 
-        expense_to_edit.date = date
+        expense_to_edit.date = expense_date
         expense_to_edit.category = category
         expense_to_edit.amount = amount
         expense_to_edit.description = description
@@ -250,7 +244,7 @@ def edit_expense(expense_id):
         flash('Expense updated successfully!', 'success')
         return redirect(url_for('expenses.view_expense'))
 
-    expense_list = [expense_to_edit.date, expense_to_edit.category, str(expense_to_edit.amount), expense_to_edit.description, expense_to_edit.payment_method]
+    expense_list = [expense_to_edit.date.isoformat(), expense_to_edit.category, str(expense_to_edit.amount), expense_to_edit.description, expense_to_edit.payment_method]
     return render_template('edit_expense.html', expense=expense_list, expense_id=expense_id)
 
 

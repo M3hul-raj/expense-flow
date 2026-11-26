@@ -42,16 +42,16 @@ class Expense(db.Model):
     id             = db.Column(db.Integer, primary_key=True)
     # Indexed — most queries filter by user_id and/or date
     user_id        = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
-    date           = db.Column(db.String(10), nullable=False, index=True)  # YYYY-MM-DD
+    date           = db.Column(db.Date, nullable=False, index=True)
     category       = db.Column(db.String(50), nullable=False)
     amount         = db.Column(db.Float, nullable=False)
     description    = db.Column(db.String(255))
     payment_method = db.Column(db.String(50), default='Cash')
     created_at     = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
-    # Composite index for the most common query pattern: filter by user then month prefix
+    # Composite index covering WHERE user_id = ? ORDER BY date DESC, id DESC via backward scan
     __table_args__ = (
-        db.Index('idx_expense_user_date', 'user_id', 'date'),
+        db.Index('idx_expense_user_date_id', 'user_id', 'date', 'id'),
     )
 
 

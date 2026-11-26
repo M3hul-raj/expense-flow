@@ -450,13 +450,14 @@ class TestPdfExportEscaping:
     def test_pdf_export_escapes_xml_chars_in_description_and_email(
         self, auth_client, user
     ):
+        from datetime import date as py_date
         from models import Expense
 
         u = db.session.get(User, user.id)
         u.email = 'alice&bob@test.com'
         db.session.add(Expense(
             user_id=user.id,
-            date='2026-07-10',
+            date=py_date(2026, 7, 10),
             category='Shopping',
             amount=499.0,
             description='Coffee <b>bold & <online> snacks',
@@ -464,7 +465,7 @@ class TestPdfExportEscaping:
         ))
         db.session.add(Expense(
             user_id=user.id,
-            date='2026-07-11',
+            date=py_date(2026, 7, 11),
             category='Food',
             amount=120.0,
             description=('A' * 44) + '&Z',
@@ -482,6 +483,7 @@ class TestDashboardRecentTransactions:
     """Tests ensuring /dashboard shows the 5 newest transactions, not the 5 oldest."""
 
     def test_dashboard_displays_five_newest_expenses(self, auth_client, user):
+        from datetime import date as py_date
         from models import Expense
 
         entries = [
@@ -496,7 +498,7 @@ class TestDashboardRecentTransactions:
         for dt, desc in entries:
             db.session.add(Expense(
                 user_id=user.id,
-                date=dt,
+                date=py_date.fromisoformat(dt),
                 category='Food',
                 amount=50.0,
                 description=desc,
@@ -800,3 +802,29 @@ class TestDependencyLockfiles:
             names.add(pkg_spec.split('==', 1)[0].lower())
         assert 'psycopg' in names
         assert 'psycopg-binary' in names
+
+
+class TestExpenseDateColumnAndQueries:
+    """Tests ensuring Expense.date is SQL DATE and month filtering uses calendar date ranges."""
+
+    def test_expense_date_column_is_sql_date_and_month_range_handles_leap_year(self, auth_client, user):
+        from datetime import date as py_date
+        import sqlalchemy as sa
+        from models import Expense
+        from utils import get_monthly_spending, month_date_range
+
+        assert isinstance(Expense.__table__.c.date.type, sa.Date)
+        assert month_date_range('2024-02') == (py_date(2024, 2, 1), py_date(2024, 3, 1))
+        assert month_date_range('2026-12') == (py_date(2026, 12, 1), py_date(2027, 1, 1))
+
+        db.session.add(Expense(user_id=user.id, date=py_date(2024, 2, 29), category='Food', amount=100.0, payment_method='UPI'))
+        db.session.add(Expense(user_id=user.id, date=py_date(2024, 3, 1), category='Food', amount=50.0, payment_method='UPI'))
+        db.session.commit()
+
+        assert get_monthly_spending(user.id, '2024-02') == 100.0
+        assert get_monthly_spending(user.id, '2024-03') == 50.0
+
+        assert auth_client.get('/analytics?month=2024-02').status_code == 200
+        assert auth_client.get('/export/pdf?month=2024-02').status_code == 200
+        assert auth_client.get('/view').status_code == 200
+        assert auth_client.get('/dashboard').status_code == 200
