@@ -65,22 +65,22 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 
 ### Progressive Web App (PWA)
 - **Installable** — Add to home screen on mobile and desktop
-- **Service Worker** — Smart caching with cache-first for static assets, network-first for pages
-- **Offline Support** — Branded offline fallback page when network is unavailable
+- **Service Worker** — Cache-first for static assets and `/offline`; network-only for HTML pages so authenticated pages are never cached
+- **Offline Support** — Branded `/offline` fallback page when network is unavailable
 - **App Icons** — Custom 192x192 and 512x512 indigo icons with stacked-layers logo
 
 ### Security & Infrastructure
 - **CSRF Protection** — All POST forms validated via Flask-WTF CSRF tokens
 - **Login Rate Limiting** — Flask-Limiter enforces 5 attempts per 15 minutes on `/login` POST to prevent brute-force attacks
 - **SQLAlchemy ORM** — Proper relational models with cascade deletes
-- **Application Factory** — `create_app()` pattern with separate production and testing configurations
+- **Application Factory** — `create_app()` pattern supporting `production`, `development`, and `testing` configurations
 - **Blueprint Architecture** — Routes split into 5 blueprints (`auth`, `expenses`, `budget`, `analytics`, `main`) for modularity
 - **Indexed Queries** — Database indexes on `user_id`, `date`, `username`, `email`, and composite `(user_id, date)`
-- **Server-side Validation** — Regex-based input sanitization, whitelist validation for categories and payment methods, future-date blocking
-- **Automated Testing** — 26 pytest tests covering CRUD, budget logic, validation, and CSRF enforcement
-- **CI/CD** — GitHub Actions workflow runs `pytest tests/ -v` on every push and PR to `main`
+- **Server-side Validation** — Regex-based input sanitization, whitelist validation for categories/payment methods/avatars, password re-authentication for email changes, future-date blocking
+- **Automated Testing** — 87 pytest tests covering CRUD, budget logic, validation, CSRF enforcement, and security regressions
+- **CI/CD** — GitHub Actions workflow runs `pytest tests/ -v` across Python 3.10–3.13 on every push and PR to `main`
 - **Structured Logging** — All events logged to `expenseflow.log` with timestamps
-- **Environment Variables** — `SECRET_KEY` loaded from `EXPENSEFLOW_SECRET_KEY` env var
+- **Environment Configuration** — Fail-fast `EXPENSEFLOW_SECRET_KEY` (32+ chars) in production; optional `EXPENSEFLOW_ENV` and `EXPENSEFLOW_DATABASE_URI`
 
 ---
 
@@ -122,7 +122,7 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 | **Security** | Flask-WTF (CSRF), Flask-Limiter (rate limiting) |
 | **Database** | SQLite via SQLAlchemy ORM |
 | **Authentication** | Werkzeug security (pbkdf2 password hashing) |
-| **Testing** | pytest (26 tests), GitHub Actions CI |
+| **Testing** | pytest (87 tests), GitHub Actions CI (Python 3.10–3.13) |
 | **Frontend** | HTML5, CSS3, JavaScript, Jinja2 templating |
 | **UI Framework** | Bootstrap 5.3, Font Awesome 6.4 |
 | **Charts** | Chart.js 4.4 |
@@ -171,17 +171,25 @@ source venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the application
+# Run the development server (defaults EXPENSEFLOW_ENV to 'development' on 127.0.0.1:5000)
 python app.py
 ```
 
 Open your browser and navigate to **http://127.0.0.1:5000/**
 
-### Environment Variables (Optional)
+### Environment Variables & App Modes
 
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `EXPENSEFLOW_SECRET_KEY` | Flask session secret key | Dev fallback (change in production) |
+| Variable | Purpose | Requirement & Default |
+|----------|---------|-----------------------|
+| `EXPENSEFLOW_ENV` | Runtime mode: `production`, `development`, or `testing` | `create_app()` (and lazy `app` WSGI/Gunicorn entrypoint) defaults to `production`; `python app.py` defaults to `development` |
+| `EXPENSEFLOW_SECRET_KEY` | Flask session signing key | **Required in `production`** (minimum 32 characters after stripping whitespace, non-default). `development` mode uses a built-in fallback and requires no manually configured key |
+| `EXPENSEFLOW_DATABASE_URI` | Optional SQLAlchemy database URI | Optional in `production` and `development`; defaults to `sqlite:///expenses.db`. In `testing` mode, an isolated in-memory SQLite database (`sqlite:///:memory:`) is always used |
+
+Generate a strong production key with:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
 
 ---
 
@@ -198,19 +206,25 @@ Open your browser and navigate to **http://127.0.0.1:5000/**
    mkvirtualenv --python=/usr/bin/python3.10 myvenv
    pip install -r requirements.txt
    ```
-4. Go to **Web** tab → **Add a new web app** → **Manual configuration** → Python 3.10
-5. Set **Source code** to `/home/YOUR_USERNAME/expense-flow`
-6. Set **Virtualenv** to `myvenv`
-7. Edit the **WSGI configuration file**:
+4. Generate a production secret key in Bash:
+   ```bash
+   python -c "import secrets; print(secrets.token_hex(32))"
+   ```
+5. Go to **Web** tab → **Add a new web app** → **Manual configuration** → Python 3.10
+6. Set **Source code** to `/home/YOUR_USERNAME/expense-flow`
+7. Set **Virtualenv** to `myvenv`
+8. Edit the **WSGI configuration file** (set environment variables *before* importing `app`):
    ```python
    import sys, os
    path = '/home/YOUR_USERNAME/expense-flow'
    if path not in sys.path:
        sys.path.append(path)
    os.chdir(path)
+   os.environ['EXPENSEFLOW_ENV'] = 'production'
+   os.environ['EXPENSEFLOW_SECRET_KEY'] = 'paste-your-generated-key-here'
    from app import app as application
    ```
-8. Click **Reload** — your app is live!
+9. Click **Reload** — your app is live!
 
 ---
 
@@ -234,7 +248,8 @@ expense-flow/
 │   └── main.py                 # PWA routes (service worker, manifest, offline)
 ├── tests/
 │   ├── conftest.py             # Shared pytest fixtures (isolated in-memory DB)
-│   └── test_app.py             # 26 functional tests (CRUD, budget, CSRF)
+│   ├── test_app.py             # 26 functional tests (CRUD, budget, CSRF)
+│   └── test_regressions.py     # 61 regression tests (config, security, validation, escaping)
 ├── static/
 │   ├── main.css                # Design system (fintech theme)
 │   ├── avatars.css             # Avatar styling
