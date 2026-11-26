@@ -299,3 +299,78 @@ class TestEditProfileValidation:
         assert b'already in use' in resp.data
 
 
+class TestSetBudgetValidation:
+    """Tests for /set_budget validation while preserving recurring budgets."""
+
+    def test_missing_form_keys_handled_without_error(self, auth_client, user):
+        from models import Budget
+
+        resp = auth_client.post('/set_budget', data={}, follow_redirects=True)
+        assert resp.status_code == 200
+        assert Budget.query.filter_by(user_id=user.id).count() == 0
+
+    @pytest.mark.parametrize('bad_month', ['', '0', '00', '13', 'abc'])
+    def test_invalid_month_rejected(self, auth_client, user, bad_month):
+        from models import Budget
+
+        resp = auth_client.post(
+            '/set_budget',
+            data={'month': bad_month, 'year': '2026', 'budget': '5000'},
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        assert b'valid month' in resp.data
+        assert Budget.query.filter_by(user_id=user.id).count() == 0
+
+    @pytest.mark.parametrize('bad_year', ['', '1999', '2101', '99999', 'abcd'])
+    def test_invalid_year_rejected(self, auth_client, user, bad_year):
+        from models import Budget
+
+        resp = auth_client.post(
+            '/set_budget',
+            data={'month': '05', 'year': bad_year, 'budget': '5000'},
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        assert b'valid year' in resp.data
+        assert Budget.query.filter_by(user_id=user.id).count() == 0
+
+    @pytest.mark.parametrize('bad_amount', ['', '0', '-50', 'nan', 'inf', '-inf', 'abc', '200000000'])
+    def test_invalid_budget_amount_rejected(self, auth_client, user, bad_amount):
+        from models import Budget
+
+        resp = auth_client.post(
+            '/set_budget',
+            data={'month': '05', 'year': '2026', 'budget': bad_amount},
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        assert Budget.query.filter_by(user_id=user.id).count() == 0
+
+    def test_valid_monthly_and_recurring_budget_preserved(self, auth_client, user):
+        from models import Budget
+
+        resp1 = auth_client.post(
+            '/set_budget',
+            data={'month': '5', 'year': '2026', 'budget': '4500'},
+            follow_redirects=True,
+        )
+        assert resp1.status_code == 200
+        db.session.expire_all()
+        row = Budget.query.filter_by(user_id=user.id, year_month='2026-05').first()
+        assert row is not None and row.amount == 4500.0
+        assert db.session.get(User, user.id).recurring_budget is None
+
+        resp2 = auth_client.post(
+            '/set_budget',
+            data={'month': '06', 'year': '2026', 'budget': '6000', 'recurring': '1'},
+            follow_redirects=True,
+        )
+        assert resp2.status_code == 200
+        db.session.expire_all()
+        row2 = Budget.query.filter_by(user_id=user.id, year_month='2026-06').first()
+        assert row2 is not None and row2.amount == 6000.0
+        assert db.session.get(User, user.id).recurring_budget == 6000.0
+
+
+
