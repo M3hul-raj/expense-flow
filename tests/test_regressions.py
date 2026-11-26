@@ -704,15 +704,27 @@ class TestDatabaseConfig:
         assert normalize_database_uri(raw_uri) == expected_uri
 
     def test_postgres_uri_sets_pool_pre_ping_and_normalizes_scheme(self, monkeypatch):
-        """Production PostgreSQL config must normalize URI and enable pool_pre_ping."""
+        """Production PostgreSQL config must normalize URI and enable pool_pre_ping even without psycopg installed."""
+        monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', 'prod-secret-key-with-at-least-32-chars!!')
+        monkeypatch.setenv('EXPENSEFLOW_DATABASE_URI', 'postgres://user:pass@db.internal:5432/expenseflow')
+        monkeypatch.setattr(db, 'init_app', lambda _app: None)
+        monkeypatch.setattr(db, 'create_all', lambda: None)
+
+        pg_app = create_app('production')
+        assert pg_app.config['SQLALCHEMY_DATABASE_URI'] == 'postgresql+psycopg://user:pass@db.internal:5432/expenseflow'
+        assert pg_app.config.get('SQLALCHEMY_ENGINE_OPTIONS', {}).get('pool_pre_ping') is True
+
+    def test_postgres_uri_loads_psycopg_dialect_when_installed(self, monkeypatch):
+        """When optional psycopg is installed, create_app builds a psycopg-backed SQLAlchemy engine."""
+        pytest.importorskip('psycopg')
         monkeypatch.setenv('EXPENSEFLOW_SECRET_KEY', 'prod-secret-key-with-at-least-32-chars!!')
         monkeypatch.setenv('EXPENSEFLOW_DATABASE_URI', 'postgres://user:pass@db.internal:5432/expenseflow')
         monkeypatch.setattr(db, 'create_all', lambda: None)
 
         pg_app = create_app('production')
         try:
-            assert pg_app.config['SQLALCHEMY_DATABASE_URI'] == 'postgresql+psycopg://user:pass@db.internal:5432/expenseflow'
-            assert pg_app.config.get('SQLALCHEMY_ENGINE_OPTIONS', {}).get('pool_pre_ping') is True
+            with pg_app.app_context():
+                assert db.engine.dialect.driver == 'psycopg'
         finally:
             with pg_app.app_context():
                 db.engine.dispose()
