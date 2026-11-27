@@ -72,13 +72,13 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 ### Security & Infrastructure
 - **CSRF Protection** — All POST forms validated via Flask-WTF CSRF tokens
 - **Login Rate Limiting** — Flask-Limiter enforces 5 attempts per 15 minutes on `/login` POST to prevent brute-force attacks
-- **SQLAlchemy ORM** — Proper relational models with cascade deletes
-- **Application Factory** — `create_app()` pattern supporting `production`, `development`, and `testing` configurations
+- **SQLAlchemy ORM & Migrations** — SQLite and PostgreSQL 16 parity via Alembic (`0001`–`0006`), `BigInteger` paise money columns, `CHECK`/`NOT NULL` constraints, and `ON DELETE CASCADE` foreign keys
+- **Application Factory** — `create_app()` pattern supporting `production`, `development`, and `testing` configurations (with per-connection SQLite `PRAGMA foreign_keys=ON`)
 - **Blueprint Architecture** — Routes split into 5 blueprints (`auth`, `expenses`, `budget`, `analytics`, `main`) for modularity
-- **Indexed Queries** — Database indexes on `user_id`, `date`, `username`, `email`, and composite `(user_id, date)`
-- **Server-side Validation** — Regex-based input sanitization, whitelist validation for categories/payment methods/avatars, password re-authentication for email changes, future-date blocking
-- **Automated Testing** — 87 pytest tests covering CRUD, budget logic, validation, CSRF enforcement, and security regressions
-- **CI/CD** — GitHub Actions workflow runs `pytest tests/ -v` across Python 3.10–3.13 on every push and PR to `main`
+- **Indexed Queries** — Composite `(user_id, date, id)` ordering index, half-open `DATE` range queries, and functional `lower(username)` / `lower(email)` unique indexes
+- **Server-side Validation** — `Decimal` (`ROUND_HALF_UP`) money parsing, case-insensitive auth queries, whitelist validation for categories/payment methods/avatars, password re-authentication for email changes, and future-date blocking
+- **Automated Testing** — 166 pytest tests covering CRUD, budget logic, validation, CSRF enforcement, security regressions, Alembic migrations, and database constraints
+- **CI/CD** — GitHub Actions workflow runs `pytest tests/ -v` across Python 3.10–3.13 (SQLite) and PostgreSQL 16 on every push and PR to `main`
 - **Structured Logging** — All events logged to `expenseflow.log` with timestamps
 - **Environment Configuration** — Fail-fast `EXPENSEFLOW_SECRET_KEY` (32+ chars) in production; optional `EXPENSEFLOW_ENV` and `EXPENSEFLOW_DATABASE_URI`
 
@@ -118,11 +118,12 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 
 | Layer | Technology |
 |-------|-----------|
-| **Backend** | Python 3.14, Flask 3.1, Flask-SQLAlchemy |
+| **Backend** | Python 3.10–3.13, Flask 3.1, Flask-SQLAlchemy, Alembic |
 | **Security** | Flask-WTF (CSRF), Flask-Limiter (rate limiting) |
-| **Database** | SQLite via SQLAlchemy ORM |
+| **Database** | SQLite & PostgreSQL 16 (`psycopg` v3), Alembic migrations |
 | **Authentication** | Werkzeug security (pbkdf2 password hashing) |
-| **Testing** | pytest (87 tests), GitHub Actions CI (Python 3.10–3.13) |
+| **Testing** | pytest (166 tests), GitHub Actions CI (Python 3.10–3.13 + PostgreSQL 16) |
+| **Containers** | Docker Compose (`web` Flask/Gunicorn + `db` PostgreSQL 16) |
 | **Frontend** | HTML5, CSS3, JavaScript, Jinja2 templating |
 | **UI Framework** | Bootstrap 5.3, Font Awesome 6.4 |
 | **Charts** | Chart.js 4.4 |
@@ -168,11 +169,21 @@ python -m venv venv
 # Mac/Linux
 source venv/bin/activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install locked dependencies (or requirements-postgres.lock for PostgreSQL)
+pip install -r requirements.lock
+
+# Initialize / migrate the SQLite schema
+alembic upgrade head
 
 # Run the development server (defaults EXPENSEFLOW_ENV to 'development' on 127.0.0.1:5000)
 python app.py
+```
+
+Or run the Docker Compose stack (Flask/Gunicorn + PostgreSQL 16):
+
+```bash
+cp .env.example .env  # set local POSTGRES_* values
+docker compose up --build -d
 ```
 
 Open your browser and navigate to **http://127.0.0.1:5000/**
@@ -183,7 +194,8 @@ Open your browser and navigate to **http://127.0.0.1:5000/**
 |----------|---------|-----------------------|
 | `EXPENSEFLOW_ENV` | Runtime mode: `production`, `development`, or `testing` | `create_app()` (and lazy `app` WSGI/Gunicorn entrypoint) defaults to `production`; `python app.py` defaults to `development` |
 | `EXPENSEFLOW_SECRET_KEY` | Flask session signing key | **Required in `production`** (minimum 32 characters after stripping whitespace, non-default). `development` mode uses a built-in fallback and requires no manually configured key |
-| `EXPENSEFLOW_DATABASE_URI` | Optional SQLAlchemy database URI | Optional in `production` and `development`; defaults to `sqlite:///expenses.db`. In `testing` mode, an isolated in-memory SQLite database (`sqlite:///:memory:`) is always used |
+| `EXPENSEFLOW_DATABASE_URI` | Optional SQLAlchemy database URI | Optional in `production` and `development`; defaults to `sqlite:///expenses.db` (`postgres://`/`postgresql://` normalize to `postgresql+psycopg://`) |
+| `EXPENSEFLOW_TEST_DATABASE_URI` | Optional pytest database URI | Used by `pytest`; defaults to isolated in-memory SQLite (`sqlite:///:memory:`) when unset |
 
 Generate a strong production key with:
 
@@ -201,11 +213,14 @@ python -c "import secrets; print(secrets.token_hex(32))"
    git clone https://github.com/M3hul-raj/expense-flow.git
    cd expense-flow
    ```
-3. Create a virtual environment:
+3. Create a virtual environment and initialize the database:
    ```bash
    mkvirtualenv --python=/usr/bin/python3.10 myvenv
-   pip install -r requirements.txt
+   pip install -r requirements.lock
+   export EXPENSEFLOW_DATABASE_URI="sqlite:///$PWD/instance/expenses.db"
+   alembic upgrade head
    ```
+   *(For repeat deploys on an existing DB, use `bash deploy/pa_deploy.sh --upgrade-to <REVISION>`.)*
 4. Generate a production secret key in Bash:
    ```bash
    python -c "import secrets; print(secrets.token_hex(32))"
@@ -233,12 +248,18 @@ python -c "import secrets; print(secrets.token_hex(32))"
 ```
 expense-flow/
 ├── .github/workflows/
-│   └── ci.yml                  # GitHub Actions CI (pytest on push/PR)
+│   └── ci.yml                  # GitHub Actions CI (SQLite 3.10–3.13 + PostgreSQL 16)
+├── alembic/
+│   ├── env.py                  # Alembic environment (batch mode on SQLite)
+│   └── versions/               # Schema migrations (0001_baseline .. 0006_constraints_case_indexes)
+├── alembic.ini                 # Alembic configuration
 ├── app.py                      # Application factory (create_app)
+├── compose.yaml                # Docker Compose (Gunicorn web + PostgreSQL 16)
+├── Dockerfile                  # Container build for web service
 ├── extensions.py               # Flask extension instances (CSRF, Limiter)
 ├── models.py                   # SQLAlchemy models (User, Expense, Budget)
-├── utils.py                    # Shared helper functions and constants
-├── requirements.txt            # Python dependencies
+├── utils.py                    # Shared helpers, Decimal/paise utilities, commit_session
+├── requirements*.in / *.lock   # Universal uv dependency lockfiles (base + postgres)
 ├── blueprints/
 │   ├── __init__.py
 │   ├── auth.py                 # Auth routes (login, register, dashboard, profile)
@@ -246,10 +267,17 @@ expense-flow/
 │   ├── budget.py               # Budget management routes
 │   ├── analytics.py            # Analytics dashboard and PDF export
 │   └── main.py                 # PWA routes (service worker, manifest, offline)
+├── deploy/
+│   └── pa_deploy.sh            # Safe PythonAnywhere deploy (--stamp / --upgrade-to)
+├── scripts/
+│   ├── smoke_test.py           # End-to-end HTTP smoke test
+│   └── verify_migration.py     # Pre/post migration audit & paise-conservation check
 ├── tests/
-│   ├── conftest.py             # Shared pytest fixtures (isolated in-memory DB)
-│   ├── test_app.py             # 26 functional tests (CRUD, budget, CSRF)
-│   └── test_regressions.py     # 61 regression tests (config, security, validation, escaping)
+│   ├── conftest.py             # Shared pytest fixtures (SQLite or EXPENSEFLOW_TEST_DATABASE_URI)
+│   ├── test_app.py             # 27 functional tests (CRUD, budget, Decimal, CSRF)
+│   ├── test_migrations.py      # 36 Alembic migration & EXPLAIN query-plan tests
+│   ├── test_migration_verification.py # 4 audit & paise-conservation tests
+│   └── test_regressions.py     # 99 regression tests (security, constraints, case auth, SW)
 ├── static/
 │   ├── main.css                # Design system (fintech theme)
 │   ├── avatars.css             # Avatar styling
