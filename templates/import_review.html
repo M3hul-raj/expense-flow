@@ -3,13 +3,13 @@
 {% block title %}Review Import Batch #{{ batch.id }} - ExpenseFlow{% endblock %}
 
 {% block content %}
-<div class="container-xl px-4 py-4">
+<div class="container-xxl px-3 px-lg-4 py-4">
 
     <!-- ─── Header ─── -->
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
         <div>
             <div class="d-flex align-items-center gap-2 mb-1">
-                <h1 class="fw-bold mb-0" style="font-size: 1.65rem;">Import Batch #{{ batch.id }}</h1>
+                <h1 class="fw-bold mb-0" style="font-size: 1.45rem;">Import Batch #{{ batch.id }}</h1>
                 {% if batch.status == 'staged' %}
                 <span class="badge rounded-pill bg-warning text-dark">Staged (Not yet saved to expenses)</span>
                 {% elif batch.status == 'confirmed' %}
@@ -162,7 +162,7 @@
                             <td class="small text-secondary">{{ row.line_number }}</td>
                             <td class="small" style="white-space:nowrap;">{{ row.txn_date.isoformat() if row.txn_date else '—' }}</td>
                             <td style="min-width: 260px;">
-                                <div class="small text-secondary mb-1">{{ row.raw_narration }}</div>
+                                <div class="small text-secondary text-break mb-1">{{ row.raw_narration }}</div>
                                 {% if batch.status == 'staged' %}
                                 <input type="text" class="form-control form-control-sm"
                                        name="description_{{ row.id }}"
@@ -189,7 +189,7 @@
                                 <span class="badge rounded-pill bg-secondary mt-1">Undone</span>
                                 {% endif %}
                             </td>
-                            <td style="min-width: 220px;">
+                            <td style="min-width: 230px;">
                                 {% if batch.status == 'staged' %}
                                 <select name="category_{{ row.id }}" class="form-select form-select-sm mb-2">
                                     {% for cat in categories %}
@@ -197,7 +197,7 @@
                                     {% endfor %}
                                 </select>
                                 <div class="d-flex align-items-center gap-2">
-                                    <div class="form-check mb-0">
+                                    <div class="form-check mb-0 text-nowrap">
                                         <input class="form-check-input" type="checkbox"
                                                name="always_apply_{{ row.id }}" value="1"
                                                id="always_{{ row.id }}">
@@ -205,12 +205,12 @@
                                             Always apply
                                         </label>
                                     </div>
-                                    <input type="text" class="form-control form-control-sm"
+                                    <input type="text" class="form-control form-control-sm flex-grow-1"
                                            name="rule_pattern_{{ row.id }}"
                                            value="{{ suggested_patterns.get(row.id, '') }}"
                                            placeholder="Keyword"
                                            maxlength="120"
-                                           style="max-width: 120px;">
+                                           style="min-width: 110px;">
                                 </div>
                                 {% else %}
                                 <span class="badge rounded-pill" style="background:var(--primary-light);color:var(--primary);">
@@ -218,7 +218,7 @@
                                 </span>
                                 {% endif %}
                             </td>
-                            <td style="min-width: 140px;">
+                            <td style="min-width: 152px;">
                                 {% if batch.status == 'staged' %}
                                 <select name="payment_method_{{ row.id }}" class="form-select form-select-sm">
                                     {% for m in payment_methods %}

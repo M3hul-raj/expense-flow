@@ -633,6 +633,47 @@ async function dispatchFetch(url, { mode = 'cors', destination = '', accept = '*
         assert results['navOfflineNoCache']['status'] == 503
 
 
+class TestUiPolishAndLayout:
+    """Tests for cursor-glow removal, compact form sizing CSS, valid offline icon, and review column sizing."""
+
+    def test_cursor_glow_removed_from_base_templates_and_css(self, client, auth_client):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        css_text = (root / 'static' / 'main.css').read_text(encoding='utf-8')
+        assert '.cursor-glow' not in css_text
+        assert 'html {\n    font-size: 14px;' in css_text
+        assert '.form-control.form-control-sm' in css_text
+        assert '.form-select.form-select-sm' in css_text
+
+        for path in ('/', '/dashboard', '/imports'):
+            html = auth_client.get(path).data.decode('utf-8')
+            assert 'cursorGlow' not in html
+            assert 'cursor-glow' not in html
+
+    def test_offline_page_uses_valid_free_icon(self, client):
+        resp = client.get('/offline')
+        assert resp.status_code == 200
+        assert b'fa-wifi-slash' not in resp.data
+        assert b'fa-circle-exclamation' in resp.data
+
+    def test_import_review_method_column_prevents_select_truncation(self, auth_client):
+        import io
+        import re
+
+        csv_bytes = b'Date,Description,Amount\n2026-10-01,POS STARBUCKS,-120.00\n'
+        up = auth_client.post(
+            '/imports',
+            data={'bank_profile': 'signed_iso', 'statement_file': (io.BytesIO(csv_bytes), 'ui.csv')},
+            content_type='multipart/form-data',
+            follow_redirects=False,
+        )
+        batch_id = int(re.search(r'/imports/(\d+)', up.headers['Location']).group(1))
+        html = auth_client.get(f'/imports/{batch_id}').data.decode('utf-8')
+        assert 'min-width: 152px;' in html
+        assert 'container-xxl' in html
+
+
 class TestLoggingPrivacy:
     """Tests ensuring auth logs never contain email addresses or raw submitted identifiers."""
 
