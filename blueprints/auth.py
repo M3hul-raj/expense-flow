@@ -20,7 +20,7 @@ from extensions import limiter
 from utils import (
     is_logged_in, get_current_year_month, get_user_budget,
     get_budget_history, get_user_expenses_sorted,
-    paise_to_rupees_input, paise_to_chart_float,
+    paise_to_rupees_input, paise_to_chart_float, commit_session,
 )
 
 logger = logging.getLogger('expenseflow')
@@ -94,10 +94,11 @@ def register():
             return redirect(url_for('auth.register'))
 
         existing_user = User.query.filter(
-            (User.username == username) | (User.email == email)
+            (db.func.lower(User.username) == username.lower())
+            | (db.func.lower(User.email) == email.lower())
         ).first()
         if existing_user:
-            if existing_user.username == username:
+            if existing_user.username.lower() == username.lower():
                 flash('Username already exists. Please choose a different one.', 'error')
             else:
                 flash('Email already exists. Please choose a different one.', 'error')
@@ -106,7 +107,14 @@ def register():
         new_user = User(username=username, email=email)
         new_user.set_password(password)
         db.session.add(new_user)
-        db.session.commit()
+        err = commit_session()
+        if err is not None:
+            if isinstance(err, IntegrityError):
+                flash('Username or email already exists. Please choose a different one.', 'error')
+            else:
+                logger.exception('Database error during registration')
+                flash('Unable to complete registration right now. Please try again.', 'error')
+            return redirect(url_for('auth.register'))
         logger.info('New user registered: id=%s', new_user.id)
 
         flash('Registration successful! Please log in.', 'success')
@@ -158,8 +166,10 @@ def login():
             flash('Please enter your password.', 'error')
             return redirect(url_for('auth.login'))
 
+        ident_lower = username_or_email.lower()
         user = User.query.filter(
-            (User.username == username_or_email) | (User.email == username_or_email)
+            (db.func.lower(User.username) == ident_lower)
+            | (db.func.lower(User.email) == ident_lower)
         ).first()
 
         if user and user.check_password(password):
@@ -353,7 +363,10 @@ def edit_profile():
             return redirect(url_for('auth.edit_profile'))
 
         if new_username != user.username:
-            existing_user = User.query.filter_by(username=new_username).first()
+            existing_user = User.query.filter(
+                db.func.lower(User.username) == new_username.lower(),
+                User.id != user.id,
+            ).first()
             if existing_user:
                 flash('Username already exists. Please choose a different one.', 'error')
                 return redirect(url_for('auth.edit_profile'))
@@ -362,7 +375,10 @@ def edit_profile():
             if not current_password or not user.check_password(current_password):
                 flash('Current password is required and must be correct to change your email address.', 'error')
                 return redirect(url_for('auth.edit_profile'))
-            existing_email = User.query.filter_by(email=new_email).first()
+            existing_email = User.query.filter(
+                db.func.lower(User.email) == new_email.lower(),
+                User.id != user.id,
+            ).first()
             if existing_email:
                 flash('Email already in use. Please choose a different one.', 'error')
                 return redirect(url_for('auth.edit_profile'))
@@ -383,11 +399,13 @@ def edit_profile():
         user.email = new_email
         user.avatar = new_avatar
         user.display_name = new_display_name
-        try:
-            db.session.commit()
-        except IntegrityError:
-            db.session.rollback()
-            flash('Username or email is already in use. Please choose a different one.', 'error')
+        err = commit_session()
+        if err is not None:
+            if isinstance(err, IntegrityError):
+                flash('Username or email is already in use. Please choose a different one.', 'error')
+            else:
+                logger.exception('Database error updating profile: user=%s', user_id)
+                flash('Unable to update your profile right now. Please try again.', 'error')
             return redirect(url_for('auth.edit_profile'))
 
         session['username'] = new_username

@@ -767,10 +767,6 @@ class TestMoneyPaiseMigration:
             assert insp.get_foreign_keys('budget')[0]['referred_table'] == 'user'
 
             with engine.connect() as conn:
-                ctx = MigrationContext.configure(
-                    conn, opts={'compare_type': True, 'compare_server_default': True}
-                )
-                assert compare_metadata(ctx, db.metadata) == []
                 assert conn.execute(sa.text('SELECT amount_paise FROM expense ORDER BY id ASC')).scalars().all() == [
                     30, 101, 1999, 999_999_999
                 ]
@@ -799,6 +795,12 @@ class TestMoneyPaiseMigration:
 
             command.upgrade(cfg, '0005_money_paise')
             assert compare_reports(before, audit_database(uri)) == []
+            command.upgrade(cfg, 'head')
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                assert compare_metadata(ctx, db.metadata) == []
         finally:
             if is_postgres:
                 with engine.begin() as conn:
@@ -894,7 +896,7 @@ class TestMoneyPaiseMigration:
         before1 = audit_database(uri1)
 
         command.stamp(cfg1, '0001_baseline')
-        command.upgrade(cfg1, 'head')
+        command.upgrade(cfg1, '0005_money_paise')
 
         eng1 = sa.create_engine(uri1)
         try:
@@ -907,7 +909,6 @@ class TestMoneyPaiseMigration:
                 ('username',),
                 ('email',),
             }
-            assert TestSchemaReconciliation._unexplained_diffs(eng1) == []
             assert compare_reports(before1, audit_database(uri1)) == []
 
             with eng1.connect() as sa_conn:
@@ -936,7 +937,10 @@ class TestMoneyPaiseMigration:
 
             command.downgrade(cfg1, '0004_expense_ordering_index')
             assert compare_reports(before1, audit_database(uri1)) == []
+            command.upgrade(cfg1, '0005_money_paise')
+            assert compare_reports(before1, audit_database(uri1)) == []
             command.upgrade(cfg1, 'head')
+            assert TestSchemaReconciliation._unexplained_diffs(eng1) == []
             assert compare_reports(before1, audit_database(uri1)) == []
         finally:
             eng1.dispose()
@@ -990,12 +994,11 @@ class TestMoneyPaiseMigration:
         cfg2 = _alembic_config(uri2)
         before2 = audit_database(uri2)
         command.stamp(cfg2, '0001_baseline')
-        command.upgrade(cfg2, 'head')
+        command.upgrade(cfg2, '0005_money_paise')
 
         eng2 = sa.create_engine(uri2)
         try:
             assert compare_reports(before2, audit_database(uri2)) == []
-            assert TestSchemaReconciliation._unexplained_diffs(eng2) == []
             with pytest.raises(sa.exc.IntegrityError):
                 with eng2.begin() as sa_conn:
                     sa_conn.execute(sa.text(
@@ -1008,5 +1011,224 @@ class TestMoneyPaiseMigration:
                         """INSERT INTO "user" (username, email, password_hash)
                            VALUES ('Other', 'bob@example.com', 'h2')"""
                     ))
+            command.upgrade(cfg2, 'head')
+            assert TestSchemaReconciliation._unexplained_diffs(eng2) == []
+            assert compare_reports(before2, audit_database(uri2)) == []
         finally:
             eng2.dispose()
+
+
+class TestM5ConstraintsAndCaseIndexes:
+    """Tests for M5 CHECK, NOT NULL, ON DELETE CASCADE, and functional lower() unique indexes."""
+
+    def test_0006_upgrade_and_downgrade_across_fresh_sqlite_and_postgres(self, tmp_path):
+        from datetime import date as py_date
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+        from scripts.verify_migration import audit_database, compare_reports
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'm5_fresh.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, '0005_money_paise')
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, recurring_budget_paise, registration_date, avatar)
+                       VALUES
+                       (1, 'Alice', 'Alice@Example.com', 'h1', 300000, NULL, NULL),
+                       (2, 'Bob', 'Bob@Example.com', 'h2', NULL, CURRENT_TIMESTAMP, 'avatar_2')"""
+                ))
+                conn.execute(sa.text(
+                    """INSERT INTO expense (id, user_id, date, category, amount_paise, payment_method, created_at)
+                       VALUES (1, 1, :d1, 'Food', 14950, NULL, NULL)"""
+                ), {'d1': py_date(2026, 7, 9) if is_postgres else '2026-07-09'})
+                conn.execute(sa.text(
+                    """INSERT INTO budget (id, user_id, year_month, amount_paise)
+                       VALUES (1, 1, '2026-07', 500000)"""
+                ))
+                if is_postgres:
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('"user"', 'id'), 2)"""))
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('expense', 'id'), 1)"""))
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('budget', 'id'), 1)"""))
+
+            before = audit_database(uri)
+            command.upgrade(cfg, '0006_constraints_case_indexes')
+
+            insp = sa.inspect(engine)
+            user_cols = {c['name']: c for c in insp.get_columns('user')}
+            exp_cols = {c['name']: c for c in insp.get_columns('expense')}
+            assert user_cols['registration_date']['nullable'] is False
+            assert user_cols['avatar']['nullable'] is False
+            assert exp_cols['payment_method']['nullable'] is False
+            assert exp_cols['created_at']['nullable'] is False
+
+            assert insp.get_foreign_keys('expense')[0]['options'].get('ondelete') == 'CASCADE'
+            assert insp.get_foreign_keys('budget')[0]['options'].get('ondelete') == 'CASCADE'
+
+            user_cks = {c['name'] for c in insp.get_check_constraints('user')}
+            exp_cks = {c['name'] for c in insp.get_check_constraints('expense')}
+            bud_cks = {c['name'] for c in insp.get_check_constraints('budget')}
+            assert 'ck_user_recurring_budget_paise_positive' in user_cks
+            assert 'ck_expense_amount_paise_positive' in exp_cks
+            assert 'ck_budget_amount_paise_positive' in bud_cks
+
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                assert compare_metadata(ctx, db.metadata) == []
+                if not is_postgres:
+                    idx_names = {
+                        r[0]
+                        for r in conn.execute(
+                            sa.text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='user'")
+                        )
+                    }
+                    assert {'ix_user_username_lower', 'ix_user_email_lower'} <= idx_names
+
+            after_up = audit_database(uri)
+            assert compare_reports(before, after_up) == []
+            assert all(v == 0 for v in after_up['planned_not_null_nulls'].values())
+
+            # Functional unique indexes reject case-insensitive duplicates at DB level
+            with pytest.raises(sa.exc.IntegrityError):
+                with engine.begin() as conn:
+                    conn.execute(sa.text(
+                        """INSERT INTO "user" (username, email, password_hash, registration_date, avatar)
+                           VALUES ('alice', 'alice2@example.com', 'h3', CURRENT_TIMESTAMP, 'avatar_1')"""
+                    ))
+            with pytest.raises(sa.exc.IntegrityError):
+                with engine.begin() as conn:
+                    conn.execute(sa.text(
+                        """INSERT INTO "user" (username, email, password_hash, registration_date, avatar)
+                           VALUES ('alice2', 'alice@example.com', 'h3', CURRENT_TIMESTAMP, 'avatar_1')"""
+                    ))
+
+            # CHECK constraint rejects non-positive amounts at DB level
+            with pytest.raises(sa.exc.IntegrityError):
+                with engine.begin() as conn:
+                    conn.execute(sa.text(
+                        """INSERT INTO expense (user_id, date, category, amount_paise, payment_method, created_at)
+                           VALUES (1, :d1, 'Food', 0, 'Cash', CURRENT_TIMESTAMP)"""
+                    ), {'d1': py_date(2026, 7, 9) if is_postgres else '2026-07-09'})
+
+            # ON DELETE CASCADE removes child expenses & budgets when user row is deleted
+            with engine.begin() as conn:
+                if not is_postgres:
+                    conn.execute(sa.text('PRAGMA foreign_keys=ON'))
+                conn.execute(sa.text('DELETE FROM "user" WHERE id = 1'))
+                assert conn.execute(sa.text('SELECT COUNT(*) FROM expense WHERE user_id = 1')).scalar_one() == 0
+                assert conn.execute(sa.text('SELECT COUNT(*) FROM budget WHERE user_id = 1')).scalar_one() == 0
+
+            # Downgrade back to 0005 restores prior constraints cleanly
+            command.downgrade(cfg, '0005_money_paise')
+            insp_down = sa.inspect(engine)
+            assert {c['name']: c for c in insp_down.get_columns('user')}['registration_date']['nullable'] is True
+            assert {c['name']: c for c in insp_down.get_columns('expense')}['payment_method']['nullable'] is True
+            assert not insp_down.get_foreign_keys('expense')[0]['options'].get('ondelete')
+            assert {i['name'] for i in insp_down.get_indexes('user')} >= {'ix_user_username', 'ix_user_email'}
+
+            command.upgrade(cfg, '0006_constraints_case_indexes')
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+            engine.dispose()
+
+    def test_0006_legacy_stage1a_sqlite_autoindex_migrates_to_functional_lower_indexes(self, tmp_path):
+        from scripts.verify_migration import audit_database, compare_reports
+
+        db_file = tmp_path / 'legacy_m5_autoindex.db'
+        TestSchemaReconciliation._create_legacy_stage1a_db(db_file, seed_data=True)
+        uri = f"sqlite:///{db_file.as_posix()}"
+        cfg = _alembic_config(uri)
+        before = audit_database(uri)
+
+        command.stamp(cfg, '0001_baseline')
+        command.upgrade(cfg, '0006_constraints_case_indexes')
+
+        engine = sa.create_engine(uri)
+        try:
+            insp = sa.inspect(engine)
+            assert insp.get_unique_constraints('user') == []
+            assert TestSchemaReconciliation._unexplained_diffs(engine) == []
+            assert compare_reports(before, audit_database(uri)) == []
+
+            with engine.connect() as conn:
+                idx_names = {
+                    r[0]
+                    for r in conn.execute(
+                        sa.text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='user'")
+                    )
+                }
+                assert idx_names == {'ix_user_username_lower', 'ix_user_email_lower'}
+                assert list(conn.execute(sa.text('PRAGMA foreign_key_check'))) == []
+
+            with pytest.raises(sa.exc.IntegrityError):
+                with engine.begin() as conn:
+                    conn.execute(sa.text(
+                        """INSERT INTO "user" (username, email, password_hash, registration_date, avatar)
+                           VALUES ('alice', 'unique@example.com', 'h2', CURRENT_TIMESTAMP, 'avatar_1')"""
+                    ))
+
+            command.downgrade(cfg, '0005_money_paise')
+            command.upgrade(cfg, '0006_constraints_case_indexes')
+            assert compare_reports(before, audit_database(uri)) == []
+        finally:
+            engine.dispose()
+
+    @pytest.mark.parametrize(
+        'case_kind',
+        ['username_collision', 'email_collision', 'non_positive_expense', 'non_positive_recurring', 'orphan_fk'],
+    )
+    def test_0006_aborts_on_blocking_data_violations(self, tmp_path, case_kind):
+        db_file = tmp_path / f'abort_{case_kind}.db'
+        uri = f"sqlite:///{db_file.as_posix()}"
+        cfg = _alembic_config(uri)
+        command.upgrade(cfg, '0005_money_paise')
+
+        engine = sa.create_engine(uri)
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, recurring_budget_paise, registration_date, avatar)
+                       VALUES (1, 'Alice', 'alice@example.com', 'h1', 300000, CURRENT_TIMESTAMP, 'avatar_1')"""
+                ))
+                if case_kind == 'username_collision':
+                    conn.execute(sa.text(
+                        """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                           VALUES (2, 'alice', 'alice2@example.com', 'h2', CURRENT_TIMESTAMP, 'avatar_1')"""
+                    ))
+                elif case_kind == 'email_collision':
+                    conn.execute(sa.text(
+                        """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                           VALUES (2, 'bob', 'ALICE@example.com', 'h2', CURRENT_TIMESTAMP, 'avatar_1')"""
+                    ))
+                elif case_kind == 'non_positive_expense':
+                    conn.execute(sa.text(
+                        """INSERT INTO expense (id, user_id, date, category, amount_paise, payment_method, created_at)
+                           VALUES (1, 1, '2026-07-09', 'Food', 0, 'Cash', CURRENT_TIMESTAMP)"""
+                    ))
+                elif case_kind == 'non_positive_recurring':
+                    conn.execute(sa.text(
+                        'UPDATE "user" SET recurring_budget_paise = -100 WHERE id = 1'
+                    ))
+                elif case_kind == 'orphan_fk':
+                    conn.execute(sa.text(
+                        """INSERT INTO expense (id, user_id, date, category, amount_paise, payment_method, created_at)
+                           VALUES (1, 9999, '2026-07-09', 'Food', 1000, 'Cash', CURRENT_TIMESTAMP)"""
+                    ))
+
+            with pytest.raises(ValueError, match='Cannot'):
+                command.upgrade(cfg, '0006_constraints_case_indexes')
+
+            with engine.connect() as conn:
+                ver = conn.execute(sa.text('SELECT version_num FROM alembic_version')).scalar_one()
+                assert ver == '0005_money_paise'
+        finally:
+            engine.dispose()

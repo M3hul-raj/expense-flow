@@ -953,3 +953,295 @@ class TestMoneyPaiseAndDecimalParsing:
         assert resp_edit.status_code == 200
         db.session.expire_all()
         assert db.session.get(Expense, valid.id).amount_paise == 5000
+
+
+class TestDatabaseConstraintsAndForeignKeys:
+    """Tests for M5 CHECK, NOT NULL, ON DELETE CASCADE, and SQLite PRAGMA foreign_keys=ON."""
+
+    def test_sqlite_pragma_foreign_keys_enabled_and_rejects_orphan_fk(self, app):
+        from datetime import date as py_date
+        import sqlalchemy as sa
+        from sqlalchemy.exc import IntegrityError
+        from models import Expense
+
+        with app.app_context():
+            if db.engine.dialect.name == 'sqlite':
+                assert db.session.execute(sa.text('PRAGMA foreign_keys')).scalar_one() == 1
+
+            db.session.add(Expense(
+                user_id=999_999,
+                date=py_date(2026, 7, 9),
+                category='Food',
+                amount_paise=1000,
+                payment_method='Cash',
+            ))
+            with pytest.raises(IntegrityError):
+                db.session.commit()
+            db.session.rollback()
+
+    def test_on_delete_cascade_deletes_user_children_at_db_level(self, app, user):
+        from datetime import date as py_date
+        import sqlalchemy as sa
+        from models import Budget, Expense
+
+        with app.app_context():
+            db.session.add(Expense(
+                user_id=user.id,
+                date=py_date(2026, 7, 9),
+                category='Food',
+                amount_paise=2500,
+                payment_method='UPI',
+            ))
+            db.session.add(Budget(user_id=user.id, year_month='2026-07', amount_paise=500_000))
+            db.session.commit()
+
+            # Bypass ORM cascade to verify database-level ON DELETE CASCADE
+            db.session.execute(sa.text('DELETE FROM "user" WHERE id = :uid'), {'uid': user.id})
+            db.session.commit()
+
+            assert Expense.query.filter_by(user_id=user.id).count() == 0
+            assert Budget.query.filter_by(user_id=user.id).count() == 0
+
+    @pytest.mark.parametrize('bad_paise', [0, -1, -5000])
+    def test_db_check_constraints_reject_non_positive_amounts(self, app, user, bad_paise):
+        import sqlalchemy as sa
+        from sqlalchemy.exc import IntegrityError
+
+        with app.app_context():
+            with pytest.raises(IntegrityError):
+                db.session.execute(
+                    sa.text(
+                        """INSERT INTO expense (user_id, date, category, amount_paise, payment_method, created_at)
+                           VALUES (:uid, '2026-07-09', 'Food', :amt, 'Cash', CURRENT_TIMESTAMP)"""
+                    ),
+                    {'uid': user.id, 'amt': bad_paise},
+                )
+                db.session.commit()
+            db.session.rollback()
+
+            with pytest.raises(IntegrityError):
+                db.session.execute(
+                    sa.text(
+                        """INSERT INTO budget (user_id, year_month, amount_paise)
+                           VALUES (:uid, '2026-07', :amt)"""
+                    ),
+                    {'uid': user.id, 'amt': bad_paise},
+                )
+                db.session.commit()
+            db.session.rollback()
+
+            with pytest.raises(IntegrityError):
+                db.session.execute(
+                    sa.text('UPDATE "user" SET recurring_budget_paise = :amt WHERE id = :uid'),
+                    {'uid': user.id, 'amt': bad_paise},
+                )
+                db.session.commit()
+            db.session.rollback()
+
+    def test_db_not_null_constraints_tightened_on_user_and_expense(self, app, user):
+        import sqlalchemy as sa
+        from sqlalchemy.exc import IntegrityError
+        from models import Expense
+
+        assert User.__table__.c.registration_date.nullable is False
+        assert User.__table__.c.avatar.nullable is False
+        assert Expense.__table__.c.payment_method.nullable is False
+        assert Expense.__table__.c.created_at.nullable is False
+
+        with app.app_context():
+            with pytest.raises(IntegrityError):
+                db.session.execute(
+                    sa.text(
+                        """INSERT INTO "user" (username, email, password_hash, registration_date, avatar)
+                           VALUES ('nullreg', 'nullreg@example.com', 'h', NULL, 'avatar_1')"""
+                    )
+                )
+                db.session.commit()
+            db.session.rollback()
+
+            with pytest.raises(IntegrityError):
+                db.session.execute(
+                    sa.text(
+                        """INSERT INTO expense (user_id, date, category, amount_paise, payment_method, created_at)
+                           VALUES (:uid, '2026-07-09', 'Food', 1000, NULL, CURRENT_TIMESTAMP)"""
+                    ),
+                    {'uid': user.id},
+                )
+                db.session.commit()
+            db.session.rollback()
+
+
+class TestCaseInsensitiveAuthAndRollbackHygiene:
+    """Tests for lower(username)/lower(email) functional unique indexes, case-insensitive auth, and session rollbacks."""
+
+    def test_register_rejects_case_insensitive_duplicate_username_and_email(self, client, user):
+        resp_u = client.post(
+            '/register',
+            data={
+                'username': 'ALICE',
+                'email': 'new_alice@test.com',
+                'password': 'password123',
+                'confirm_password': 'password123',
+            },
+            follow_redirects=True,
+        )
+        assert resp_u.status_code == 200
+        assert b'Username already exists' in resp_u.data
+        assert User.query.count() == 1
+
+        resp_e = client.post(
+            '/register',
+            data={
+                'username': 'alice_two',
+                'email': 'ALICE@TEST.COM',
+                'password': 'password123',
+                'confirm_password': 'password123',
+            },
+            follow_redirects=True,
+        )
+        assert resp_e.status_code == 200
+        assert b'Email already exists' in resp_e.data
+        assert User.query.count() == 1
+
+    def test_login_accepts_case_insensitive_username_and_email(self, client, user):
+        for identifier in ('ALICE', 'Alice@Test.COM'):
+            client.get('/logout', follow_redirects=False)
+            resp = client.post(
+                '/login',
+                data={'username': identifier, 'password': 'password123'},
+                follow_redirects=False,
+            )
+            assert resp.status_code == 302
+            assert resp.headers['Location'].endswith('/dashboard')
+
+    def test_edit_profile_case_insensitive_uniqueness_and_self_recasing(
+        self, auth_client, user, user2
+    ):
+        resp_dup_u = auth_client.post(
+            '/edit_profile',
+            data={'username': 'BOB', 'email': user.email},
+            follow_redirects=True,
+        )
+        assert b'Username already exists' in resp_dup_u.data
+
+        resp_dup_e = auth_client.post(
+            '/edit_profile',
+            data={
+                'username': user.username,
+                'email': 'BOB@TEST.COM',
+                'current_password': 'password123',
+            },
+            follow_redirects=True,
+        )
+        assert b'Email already in use' in resp_dup_e.data
+
+        resp_self = auth_client.post(
+            '/edit_profile',
+            data={
+                'username': 'Alice',
+                'email': 'Alice@Test.com',
+                'current_password': 'password123',
+            },
+            follow_redirects=True,
+        )
+        assert resp_self.status_code == 200
+        db.session.expire_all()
+        refreshed = db.session.get(User, user.id)
+        assert refreshed.username == 'Alice'
+        assert refreshed.email == 'Alice@Test.com'
+
+    def test_functional_unique_indexes_block_case_duplicates_via_raw_sql(self, app, user):
+        import sqlalchemy as sa
+        from sqlalchemy.exc import IntegrityError
+
+        with app.app_context():
+            with pytest.raises(IntegrityError):
+                db.session.execute(
+                    sa.text(
+                        """INSERT INTO "user" (username, email, password_hash, registration_date, avatar)
+                           VALUES ('ALICE', 'other@test.com', 'h', CURRENT_TIMESTAMP, 'avatar_1')"""
+                    )
+                )
+                db.session.commit()
+            db.session.rollback()
+
+            with pytest.raises(IntegrityError):
+                db.session.execute(
+                    sa.text(
+                        """INSERT INTO "user" (username, email, password_hash, registration_date, avatar)
+                           VALUES ('otheruser', 'ALICE@TEST.COM', 'h', CURRENT_TIMESTAMP, 'avatar_1')"""
+                    )
+                )
+                db.session.commit()
+            db.session.rollback()
+            assert User.query.count() == 1
+
+    def test_write_routes_rollback_cleanly_on_commit_error(self, client, auth_client, user, monkeypatch):
+        from datetime import date as py_date
+        from sqlalchemy.exc import IntegrityError
+        from models import Expense
+
+        rollback_calls = []
+        orig_rollback = db.session.rollback
+
+        def spy_rollback():
+            rollback_calls.append(True)
+            return orig_rollback()
+
+        def failing_commit():
+            raise IntegrityError('COMMIT', {}, Exception('simulated constraint failure'))
+
+        exp = Expense(
+            user_id=user.id,
+            date=py_date(2026, 7, 9),
+            category='Food',
+            amount_paise=5000,
+            payment_method='Cash',
+        )
+        db.session.add(exp)
+        db.session.commit()
+
+        monkeypatch.setattr(db.session, 'rollback', spy_rollback)
+        monkeypatch.setattr(db.session, 'commit', failing_commit)
+
+        r_reg = client.post(
+            '/register',
+            data={
+                'username': 'race_user',
+                'email': 'race@example.com',
+                'password': 'password123',
+                'confirm_password': 'password123',
+            },
+            follow_redirects=True,
+        )
+        r_add = auth_client.post(
+            '/add',
+            data={
+                'date': '2026-07-09',
+                'category': 'Food',
+                'amount': '50',
+                'payment_method': 'Cash',
+            },
+            follow_redirects=True,
+        )
+        r_edit = auth_client.post(
+            f'/edit/{exp.id}',
+            data={
+                'date': '2026-07-09',
+                'category': 'Food',
+                'amount': '60',
+                'payment_method': 'Cash',
+            },
+            follow_redirects=True,
+        )
+        r_del = auth_client.post(f'/delete/{exp.id}', follow_redirects=True)
+        r_bud = auth_client.post(
+            '/set_budget',
+            data={'month': '07', 'year': '2026', 'budget': '5000'},
+            follow_redirects=True,
+        )
+
+        for resp in (r_reg, r_add, r_edit, r_del, r_bud):
+            assert resp.status_code == 200
+        assert len(rollback_calls) == 5
+        assert db.session.query(User).count() == 1

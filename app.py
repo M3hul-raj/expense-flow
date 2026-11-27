@@ -1,6 +1,7 @@
 import logging
 import os
 from flask import Flask, render_template
+from sqlalchemy import event
 from models import db
 from extensions import csrf, limiter
 
@@ -33,6 +34,15 @@ def normalize_database_uri(uri):
     if cleaned.startswith('postgresql://'):
         return 'postgresql+psycopg://' + cleaned[len('postgresql://'):]
     return cleaned
+
+
+def _enable_sqlite_foreign_keys(engine):
+    """Enable SQLite foreign key enforcement (ON DELETE CASCADE & FK checks) per connection."""
+    @event.listens_for(engine, 'connect')
+    def _set_sqlite_pragma(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute('PRAGMA foreign_keys=ON')
+        cursor.close()
 
 
 def create_app(config_name=None, database_uri=None):
@@ -112,6 +122,9 @@ def create_app(config_name=None, database_uri=None):
 
     # ── Extensions ────────────────────────────────────────────────────────
     db.init_app(app)
+    if db_uri.startswith('sqlite'):
+        with app.app_context():
+            _enable_sqlite_foreign_keys(db.engine)
     csrf.init_app(app)
     limiter.init_app(app)
 
