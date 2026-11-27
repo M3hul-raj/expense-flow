@@ -21,6 +21,21 @@ MAX_BUDGET_RUPEES = 100_000_000       # ₹10,00,00,000.00
 
 _ASCII_DECIMAL_RE = _re.compile(r'^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$')
 _PAISE_PER_RUPEE = Decimal('100')
+_CSV_FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+
+# ── Shared expense taxonomy whitelists ───────────────────────────────────────
+EXPENSE_CATEGORIES = (
+    'Food', 'Transport', 'Shopping', 'Entertainment', 'Health',
+    'Utilities', 'Education', 'Travel', 'Personal Care', 'Home',
+    'Insurance', 'Other', 'Uncategorised',
+)
+VALID_CATEGORIES = set(EXPENSE_CATEGORIES)
+
+PAYMENT_METHODS = (
+    'Cash', 'UPI', 'Credit Card', 'Debit Card', 'Net Banking',
+    'Digital Wallet', 'Other',
+)
+VALID_METHODS = set(PAYMENT_METHODS)
 
 # ── Savings tips ─────────────────────────────────────────────────────────────
 TIPS = [
@@ -88,6 +103,22 @@ def format_paise_as_rupees(paise: int, decimals: int = 2) -> str:
         return f"{sign}₹{quantized:,}"
     quantized = abs_dec.quantize(Decimal('1.' + ('0' * decimals)), rounding=ROUND_HALF_UP)
     return f"{sign}₹{quantized:,.{decimals}f}"
+
+
+def sanitize_csv_cell(value) -> str:
+    """
+    Neutralize spreadsheet formula injection (CWE-1236) for CSV exports.
+
+    Any string beginning with '=', '+', '-', '@', tab, or carriage return
+    (including after leading whitespace) is prefixed with a single quote.
+    """
+    if value is None:
+        return ''
+    text = str(value).replace('\x00', '')
+    stripped = text.lstrip(' \t\r\n')
+    if text.startswith(_CSV_FORMULA_PREFIXES) or (stripped and stripped[0] in _CSV_FORMULA_PREFIXES):
+        return "'" + text
+    return text
 
 
 def commit_session():

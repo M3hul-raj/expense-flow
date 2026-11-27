@@ -10,9 +10,9 @@ If you are a developer looking to contribute or understand the codebase, this do
 
 ExpenseFlow is a production-grade, full-stack web application built on a modern Python backend (Flask) with a custom, highly interactive vanilla JavaScript/CSS frontend. It uses the **application factory pattern** (`create_app()`) with **Flask Blueprints** and strictly implements the **MVC (Model-View-Controller)** pattern through server-side rendering (SSR):
 
-*   **Model (`models.py` + `alembic/`)**: Defines the relational schema (`User`, `Expense`, `Budget`) using SQLAlchemy ORM and versioned Alembic migrations (`0001_baseline` through `0006_constraints_case_indexes`) across SQLite and PostgreSQL 16.
+*   **Model (`models.py` + `alembic/`)**: Defines the relational schema (`User`, `Expense`, `Budget`, `ImportBatch`, `ImportRow`, `CategoryRule`) using SQLAlchemy ORM and versioned Alembic migrations (`0001_baseline` through `0007_statement_import`) across SQLite and PostgreSQL 16.
 *   **View (`templates/`, `static/`)**: Jinja2 HTML templates styled with a completely custom CSS design system (`main.css`), featuring dynamic JavaScript interactivity without heavy frontend frameworks.
-*   **Controller (`app.py` + `blueprints/`)**: The application factory in `app.py` wires extensions, per-connection SQLite `PRAGMA foreign_keys=ON`, and registers 5 blueprints (`auth`, `expenses`, `budget`, `analytics`, `main`) that contain all route logic. Shared utilities (including `Decimal`/paise helpers and `commit_session()` rollback hygiene) live in `utils.py`, and extension instances (CSRF, rate limiter) are defined in `extensions.py` to avoid circular imports.
+*   **Controller (`app.py` + `blueprints/` + `statement_import.py`)**: The application factory in `app.py` wires extensions, per-connection SQLite `PRAGMA foreign_keys=ON`, and registers 6 blueprints (`auth`, `expenses`, `budget`, `analytics`, `imports`, `main`) that contain all route logic. Bank statement parsing, mapping configs, deduplication, and deterministic categorisation live in `statement_import.py`; shared utilities (including `Decimal`/paise helpers, CSV formula neutralization, and `commit_session()` rollback hygiene) live in `utils.py`; and extension instances (CSRF, rate limiter) are defined in `extensions.py` to avoid circular imports.
 
 ---
 
@@ -24,40 +24,46 @@ expense-flow/
 │   └── ci.yml                  # GitHub Actions CI: Python 3.10–3.13 (SQLite) + PostgreSQL 16
 ├── alembic/
 │   ├── env.py                  # Alembic environment (batch rebuilds on SQLite)
-│   └── versions/               # Revisions 0001_baseline .. 0006_constraints_case_indexes
+│   └── versions/               # Revisions 0001_baseline .. 0007_statement_import
 ├── alembic.ini                 # Alembic config
 ├── app.py                      # Application factory (create_app): config, FK hook, blueprints
 ├── compose.yaml                # Two-container dev stack (Gunicorn web + PostgreSQL 16)
 ├── Dockerfile                  # Production-like container build
 ├── extensions.py               # Bare Flask extension instances (CSRFProtect, Limiter)
-├── models.py                   # SQLAlchemy models + NAMING_CONVENTION (User, Expense, Budget)
-├── utils.py                    # Shared helpers, Decimal/paise conversions, commit_session
+├── models.py                   # SQLAlchemy models + NAMING_CONVENTION (User, Expense, Budget, Import*)
+├── statement_import.py         # Bank CSV mapping configs, in-memory parser, dedupe & rule engine
+├── utils.py                    # Shared helpers, Decimal/paise conversions, CSV safety, commit_session
 ├── requirements*.in / *.lock   # Universal uv lockfiles (base + postgres)
 ├── DEVELOPER_GUIDE.md          # This documentation file
-├── docs/learning/stage-1b.md   # Stage 1B engineering notes
+├── docs/
+│   ├── RESUME_FACTS.md         # Verifiable claim -> command matrix
+│   └── learning/stage-1b.md    # Stage 1B engineering notes
 ├── blueprints/
 │   ├── __init__.py             # Package marker
 │   ├── auth.py                 # Auth routes: login, register, logout, dashboard, edit_profile
-│   ├── expenses.py             # Expense CRUD: add, view, edit, delete
+│   ├── expenses.py             # Expense CRUD & CSV export: add, view, edit, delete, export/csv
 │   ├── budget.py               # Budget management: set_budget
 │   ├── analytics.py            # Analytics dashboard (9 sections) and PDF export
+│   ├── imports.py              # Statement import upload, staging review, rules, confirm & undo
 │   └── main.py                 # PWA routes: /sw.js, /manifest.json, /offline
 ├── deploy/
 │   └── pa_deploy.sh            # PythonAnywhere deploy script (--stamp / --upgrade-to)
 ├── scripts/
-│   ├── smoke_test.py           # Stdlib end-to-end smoke test (CSRF, cookies, CRUD, PDF)
+│   ├── smoke_test.py           # Stdlib end-to-end smoke test (CSRF, cookies, CRUD, PDF, import->confirm->undo)
 │   └── verify_migration.py     # Pre/post migration audit & paise-conservation tool
 ├── tests/
 │   ├── conftest.py             # Shared pytest fixtures (SQLite or EXPENSEFLOW_TEST_DATABASE_URI)
 │   ├── test_app.py             # 27 functional tests: CRUD, budget logic, Decimal, CSRF
-│   ├── test_migrations.py      # 36 Alembic migration, compatibility & EXPLAIN plan tests
+│   ├── test_migrations.py      # 38 Alembic migration, compatibility & EXPLAIN plan tests
 │   ├── test_migration_verification.py # 4 audit & paise-conservation tests
-│   └── test_regressions.py     # 99 regression tests: config, security, constraints, case auth, SW
+│   ├── test_regressions.py     # 99 regression tests: config, security, constraints, case auth, SW
+│   └── test_statement_import.py # 21 statement import, dedupe, rules, atomicity, security & smoke tests
 ├── static/
 │   ├── main.css                # The core CSS Design System (CSS Variables, Dark/Light modes).
 │   ├── avatars.css             # Avatar styling for profile selection.
 │   ├── sw.js                   # Service Worker script handling PWA offline caching.
 │   ├── manifest.json           # Web App Manifest for PWA installation.
+│   ├── samples/                # Synthetic sample Indian bank statement CSV fixture
 │   └── icons/                  # Application icons.
 ├── templates/
 │   ├── base.html               # The master Jinja2 wrapper (Navbar, Theme Toggle, Flash messages).
@@ -67,6 +73,8 @@ expense-flow/
 │   ├── analytics.html          # Complex 9-section analytics (Heatmap, MoM trends).
 │   ├── view_expense.html       # Transactions list with multi-parameter filtering.
 │   ├── add_expense.html        # Form to add a new expense with server-side validation.
+│   ├── import_upload.html      # Statement CSV upload, batch history & categorisation rules.
+│   ├── import_review.html      # Staging review, duplicate flags, invalid rows, confirm & undo.
 │   ├── set_budget.html         # Form to configure monthly or recurring budgets.
 │   ├── edit_profile.html       # Account management page.
 │   ├── 404.html / 500.html     # Custom error pages.
@@ -79,18 +87,25 @@ expense-flow/
 
 ## 3. Database Schema & Indexing
 
-The application relies on three relational tables mapped by SQLAlchemy (`models.py`) and managed via Alembic (`alembic/`), with deterministic constraint naming (`NAMING_CONVENTION`):
+The application relies on six relational tables mapped by SQLAlchemy (`models.py`) and managed via Alembic (`alembic/`), with deterministic constraint naming (`NAMING_CONVENTION`):
 
 1.  **User (`id`, `username`, `email`, `password_hash`, `recurring_budget_paise`, `registration_date`, `avatar`, `display_name`)**
     *   Utilizes Werkzeug `pbkdf2:sha256` password hashing and `BigInteger` paise storage (`recurring_budget_paise`, `CHECK (recurring_budget_paise > 0)`).
     *   `registration_date` and `avatar` are `NOT NULL`; functional unique indexes `ix_user_username_lower` and `ix_user_email_lower` enforce case-insensitive uniqueness alongside `func.lower()` queries in `auth.py`.
-2.  **Expense (`id`, `user_id`, `date`, `category`, `amount_paise`, `description`, `payment_method`, `created_at`)**
-    *   Linked to `User` via `user_id` (`ON DELETE CASCADE`); `date` is stored as SQL `DATE`, `amount_paise` is `BigInteger` with `CHECK (amount_paise > 0)`, and `payment_method`/`created_at` are `NOT NULL`.
+2.  **Expense (`id`, `user_id`, `date`, `category`, `amount_paise`, `description`, `payment_method`, `created_at`, `import_batch_id`, `import_fingerprint`)**
+    *   Linked to `User` via `user_id` (`ON DELETE CASCADE`) and optionally to `ImportBatch` via `import_batch_id` (`ON DELETE SET NULL`); `date` is stored as SQL `DATE`, `amount_paise` is `BigInteger` with `CHECK (amount_paise > 0)`, and `payment_method`/`created_at` are `NOT NULL`.
+    *   Unique constraint `uq_expense_user_import_fingerprint` on `(user_id, import_fingerprint)` enforces per-user idempotent statement deduplication while permitting unlimited `NULL` fingerprints for manual entries.
     *   **Optimization:** Utilizes the composite ordering index `idx_expense_user_date_id` on `(user_id, date, id)` with half-open `[start, next_month_start)` date range filters for sort-free `ORDER BY date DESC, id DESC` index scans.
-    *   Categories and payment methods are validated server-side against strict whitelists; monetary inputs are parsed via `Decimal` (`ROUND_HALF_UP`).
+    *   Categories and payment methods are validated server-side against strict whitelists (`EXPENSE_CATEGORIES` including `Uncategorised`, `PAYMENT_METHODS`); monetary inputs are parsed via `Decimal` (`ROUND_HALF_UP`).
 3.  **Budget (`id`, `user_id`, `year_month`, `amount_paise`)**
     *   Linked to `User` via `user_id` (`ON DELETE CASCADE`) with a unique constraint on `(user_id, year_month)` and `CHECK (amount_paise > 0)`.
     *   If a specific month's budget is not set, the backend dynamically falls back to `User.recurring_budget_paise` or `DEFAULT_BUDGET_PAISE` (`200000` paise / ₹2,000.00).
+4.  **ImportBatch (`id`, `user_id`, `bank_profile`, `original_filename`, `file_sha256`, `detected_encoding`, `status`, counts, timestamps)**
+    *   Tracks uploaded CSV statements (`staged` → `confirmed` → `undone`) in staging without storing raw CSV files on disk.
+5.  **ImportRow (`id`, `batch_id`, `user_id`, `line_number`, `row_status`, `txn_date`, `amount_paise`, `raw_narration`, `description`, `ref_no`, `category`, `payment_method`, `fingerprint`, `error_reason`, `raw_preview`, `matched_expense_id`, `created_expense_id`, `include_on_confirm`)**
+    *   Holds every parsed post-header row (ready debits, manual-duplicate flags, already-imported rows, skipped credits, and invalid rows with explicit reasons).
+6.  **CategoryRule (`id`, `user_id`, `pattern`, `pattern_normalized`, `category`, timestamps)**
+    *   User-scoped deterministic keyword-to-category rules (`UNIQUE (user_id, pattern_normalized)`) saved from the review screen (`"Always apply"`) or rules form.
 
 > [!NOTE]
 > **Foreign Keys & Rollback Hygiene:** `create_app()` attaches a `PRAGMA foreign_keys=ON` connect hook to SQLite app engines so `ON DELETE CASCADE` and FK checks are enforced at runtime alongside PostgreSQL, and write routes commit through `commit_session()` to guarantee clean session rollback on `SQLAlchemyError`.
@@ -130,19 +145,21 @@ Instead of simply dividing total monthly spend by 30 days, the Dashboard dynamic
 *   It calculates the exact number of days that have passed in the current month to date (`max(1, datetime.now().day)`).
 *   Dividing current spending by this exact integer gives an aggressive, highly accurate daily burn rate that forces real-time financial accountability.
 
-### G. CSRF Protection & Login Rate Limiting
+### G. CSRF Protection, Rate Limiting & CSV Safety
 All POST forms include a hidden `csrf_token()` field validated by **Flask-WTF's CSRFProtect**. Extension instances are defined in `extensions.py` (not in `app.py`) to avoid circular imports with blueprints.
-*   **Rate Limiting:** Flask-Limiter enforces **5 POST requests per 15 minutes** on `/login`. The `on_breach` callback returns a proper `make_response(render_template('login.html'), 429)` — not a raw string — so the styled login page renders correctly on the 429 response.
-*   **Testing:** CSRF is disabled in the test configuration (`WTF_CSRF_ENABLED=False`) so functional tests can POST without tokens. Two dedicated tests re-enable CSRF to verify rejection without a valid token.
+*   **Rate Limiting:** Flask-Limiter enforces **5 POST requests per 15 minutes** on `/login` and **10 POST requests per 15 minutes** on `/imports`. Both `on_breach` callbacks return proper `make_response(render_template(...), 429)` responses — not raw strings — so styled pages render on 429 responses.
+*   **CSV & Statement Import Safety:** Uploaded CSVs are read strictly in memory (`2 MB` / `2,000` row caps), decoded safely (`utf-8-sig`, `utf-16`, `utf-8`, `cp1252`, `iso-8859-1` with NUL/control-byte rejection), auto-escaped by Jinja2 on render, and neutralized against spreadsheet formula injection (`=`, `+`, `-`, `@`, `\t`, `\r`) on both `/export/csv` and client-side CSV exports (`sanitize_csv_cell` / `csvSafeCell`).
+*   **Testing:** CSRF and rate limiting are disabled in `testing` mode (`WTF_CSRF_ENABLED=False`, `RATELIMIT_ENABLED=False`), with dedicated tests re-enabling both to prove `400` and `429` enforcement.
 
 ### H. Automated Testing & CI
-The `tests/` directory contains **166 pytest tests** across `test_app.py`, `test_regressions.py`, `test_migrations.py`, and `test_migration_verification.py` covering:
+The `tests/` directory contains **189 pytest tests** across `test_app.py`, `test_regressions.py`, `test_migrations.py`, `test_migration_verification.py`, and `test_statement_import.py` covering:
 *   **Expense CRUD & Precision** — add, edit, delete with `Decimal` (`ROUND_HALF_UP`) paise parsing, server-side validation, and integer paise arithmetic
-*   **Cross-user isolation** — one user cannot edit/delete another user's expenses (returns 404)
+*   **Bank CSV Statement Import** — mapping configs (`split_columns` & `signed_amount` & custom mapping), synthetic Indian bank fixture, encoding/size/row caps, explicit invalid-row reporting, skipped credits, occurrence-aware idempotent deduplication, 1-to-1 manual duplicate flags, deterministic `"Always apply"` keyword rules, and single-transaction Confirm & Undo atomicity
+*   **Cross-user isolation** — one user cannot edit/delete another user's expenses or access/confirm/undo/delete another user's import batches or rules (returns 404)
 *   **Budget logic** — default budget, explicit budget row, recurring fallback, override priority, and strict ASCII input validation
-*   **Database Integrity & Migrations** — `0001_baseline` → `0006_constraints_case_indexes` upgrade/downgrade parity, legacy Stage-1A `sqlite_autoindex_*` compatibility, `EXPLAIN` plan checks, paise-conservation audits (`verify_migration.py`), `CHECK`/`NOT NULL`/`ON DELETE CASCADE`, SQLite `PRAGMA foreign_keys=ON`, `commit_session()` rollback hygiene, and case-insensitive auth
-*   **Security & regressions** — fail-fast production `EXPENSEFLOW_SECRET_KEY` (32+ chars), HTTPS `Set-Cookie` flags (`HttpOnly`, `Secure`, `SameSite=Lax`), generic login errors, PII-free auth logs, `/edit_profile` password gate for email changes, ReportLab XML escaping, dashboard recent-transactions ordering, and `sw.js` fetch resilience
-*   **CSRF enforcement** — POST without token returns 400
+*   **Database Integrity & Migrations** — `0001_baseline` → `0007_statement_import` upgrade/downgrade parity, legacy Stage-1A `sqlite_autoindex_*` compatibility, `EXPLAIN` plan checks, paise-conservation audits (`verify_migration.py`), `CHECK`/`NOT NULL`/`ON DELETE CASCADE`, SQLite `PRAGMA foreign_keys=ON`, `commit_session()` rollback hygiene, and case-insensitive auth
+*   **Security & regressions** — fail-fast production `EXPENSEFLOW_SECRET_KEY` (32+ chars), HTTPS `Set-Cookie` flags (`HttpOnly`, `Secure`, `SameSite=Lax`), generic login errors, PII-free auth/import logs, `/edit_profile` password gate for email changes, ReportLab XML escaping, CWE-1236 CSV formula neutralization, dashboard recent-transactions ordering, and `sw.js` fetch resilience
+*   **CSRF & Rate Limiting** — POST without token returns `400`; upload limit breach returns `429`
 
 Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:`) by default or against PostgreSQL via `EXPENSEFLOW_TEST_DATABASE_URI`. **GitHub Actions CI** (`.github/workflows/ci.yml`) runs `pytest tests/ -v` across Python 3.10–3.13 (SQLite) and a PostgreSQL 16 service container on every push and pull request to `main`.
 
@@ -194,8 +211,8 @@ Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:
 2. **Run the deploy script** in the PythonAnywhere Bash console with an explicit revision (preview first with `--dry-run`):
    ```bash
    cd ~/ExpenseFlow
-   bash deploy/pa_deploy.sh --upgrade-to 0006_constraints_case_indexes --dry-run
-   bash deploy/pa_deploy.sh --upgrade-to 0006_constraints_case_indexes
+   bash deploy/pa_deploy.sh --upgrade-to 0007_statement_import --dry-run
+   bash deploy/pa_deploy.sh --upgrade-to 0007_statement_import
    ```
    *(Use `--stamp 0001_baseline` only for initial baseline tracking on an un-versioned DB.)* The script enforces branch `main`, backs up `instance/expenses.db` into `~/backups/` via `sqlite3 .backup`, verifies `PRAGMA integrity_check` and row counts, runs `git pull --ff-only origin main`, installs `requirements.lock`, executes the requested Alembic command, runs `pytest`, and prints the rollback command (`git reset --hard <old_hash>`). It never touches the WSGI file.
 3. **Reload**: Click **Reload** on the PythonAnywhere **Web** tab.
@@ -211,10 +228,11 @@ Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:
 
 For technical recruiters reviewing this repository, here is a summary of the engineering skills demonstrated in this codebase:
 
-*   **Full Stack Architecture:** Engineered a modular MVC backend with Flask's application factory pattern and 5 Blueprints, using SQLAlchemy ORM + Alembic migrations across SQLite and PostgreSQL 16 with `BigInteger` paise precision, `CHECK`/`NOT NULL`/`ON DELETE CASCADE` constraints, functional `lower()` unique indexes, and composite `(user_id, date, id)` ordering indexing.
-*   **Security Hardening:** Implemented CSRF token validation on all POST forms via Flask-WTF, brute-force login protection via Flask-Limiter (5 req / 15 min rate limit with custom 429 response rendering), fail-fast `EXPENSEFLOW_SECRET_KEY` checks, `HttpOnly`/`Secure`/`SameSite=Lax` cookies, and PII-free auth logging.
+*   **Full Stack Architecture:** Engineered a modular MVC backend with Flask's application factory pattern and 6 Blueprints, using SQLAlchemy ORM + Alembic migrations across SQLite and PostgreSQL 16 with `BigInteger` paise precision, `CHECK`/`NOT NULL`/`ON DELETE CASCADE` constraints, functional `lower()` unique indexes, composite `(user_id, date, id)` ordering indexing, and statement-import staging/rule tables.
+*   **Bank Statement Import Pipeline:** Designed a declarative CSV mapping layer (`statement_import.py`) with in-memory parsing (`2 MB` / `2,000` row caps), occurrence-aware SHA-256 idempotent deduplication, 1-to-1 manual duplicate flagging, deterministic `"Always apply"` categorisation rules, and single-transaction Confirm/Undo atomicity.
+*   **Security Hardening:** Implemented CSRF token validation on all POST forms via Flask-WTF, rate limiting via Flask-Limiter (`5 / 15 min` on `/login` and `10 / 15 min` on `/imports` with custom 429 response rendering), fail-fast `EXPENSEFLOW_SECRET_KEY` checks, `HttpOnly`/`Secure`/`SameSite=Lax` cookies, CWE-1236 CSV formula neutralization, and PII-free logging.
 *   **Advanced Data Processing:** Developed complex data aggregation algorithms to feed a real-time 9-section analytics engine, calculating dynamic budget thresholds, MoM variances, and heatmap intensities.
-*   **Testing & CI/CD:** Built a 166-test pytest suite with isolated SQLite & PostgreSQL 16 fixtures, migration verification tooling, and a stdlib end-to-end smoke test, integrated into a GitHub Actions CI pipeline across Python 3.10–3.13 and PostgreSQL 16.
+*   **Testing & CI/CD:** Built a 189-test pytest suite with isolated SQLite & PostgreSQL 16 fixtures, migration verification tooling, and a stdlib end-to-end smoke test (including `import -> confirm -> undo`), integrated into a GitHub Actions CI pipeline across Python 3.10–3.13 and PostgreSQL 16.
 *   **UI/UX Engineering:** Designed a premium, glassmorphic UI with a scalable CSS variable architecture, implementing flawless, OS-aware Dark and Light modes.
 *   **Web APIs & PWA:** Programmed a custom Service Worker with network-only HTML navigations (zero private page caching) and cache-first static asset caching for offline resilience and mobile installation.
 *   **Document Generation:** Built a custom pipeline using ReportLab to dynamically render and serve formatted, paginated PDF financial reports from memory.

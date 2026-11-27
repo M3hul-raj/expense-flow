@@ -1,0 +1,306 @@
+{% extends "base.html" %}
+
+{% block title %}Import Bank Statement - ExpenseFlow{% endblock %}
+
+{% block content %}
+<div class="container-xl px-4 py-4">
+
+    <!-- ─── Page Header ─── -->
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
+        <div>
+            <h1 class="fw-bold mb-1" style="font-size: 1.75rem;">
+                <i class="fas fa-file-import text-primary me-2"></i>Import Bank Statement
+            </h1>
+            <p class="text-secondary mb-0 small">
+                Upload a CSV statement, review detected transactions, apply rules, and confirm in one atomic batch.
+            </p>
+        </div>
+        <div class="d-flex gap-2 flex-wrap">
+            <a href="{{ url_for('static', filename='samples/synthetic_indian_bank_statement.csv') }}"
+               download="synthetic_indian_bank_statement.csv"
+               class="btn btn-light btn-sm rounded-pill">
+                <i class="fas fa-download me-1 text-primary"></i>Sample Indian Bank CSV
+            </a>
+            <a href="{{ url_for('expenses.view_expense') }}" class="btn btn-outline-primary btn-sm rounded-pill">
+                <i class="fas fa-list me-1"></i>Transactions
+            </a>
+        </div>
+    </div>
+
+    <div class="row g-4 mb-4">
+        <!-- ─── Upload Form ─── -->
+        <div class="col-lg-7">
+            <div class="fintech-card h-100">
+                <div class="fintech-card-title mb-3">
+                    <i class="fas fa-upload text-primary"></i>
+                    Upload CSV Statement
+                </div>
+                <form method="POST" action="{{ url_for('imports.index') }}" enctype="multipart/form-data" id="importUploadForm">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                    <div class="mb-3">
+                        <label for="bank_profile" class="form-label">Bank Statement Format</label>
+                        <select class="form-select" id="bank_profile" name="bank_profile" required>
+                            {% for fmt in bank_formats %}
+                            <option value="{{ fmt.key }}" data-desc="{{ fmt.description }}">{{ fmt.label }}</option>
+                            {% endfor %}
+                            <option value="custom" data-desc="Configure custom CSV column names, date format, debit/credit mode, and preamble rows to skip.">
+                                Custom CSV Column Mapping…
+                            </option>
+                        </select>
+                        <div id="formatDescription" class="form-text small text-secondary mt-1">
+                            {{ bank_formats[0].description if bank_formats else '' }}
+                        </div>
+                    </div>
+
+                    <!-- Custom Mapping Config (visible when 'custom' selected) -->
+                    <div id="customMappingPanel" class="p-3 rounded-3 mb-3 d-none"
+                         style="background: var(--bg-color); border: 1px dashed var(--border-color);">
+                        <p class="fw-bold small mb-2 text-primary">Custom Column Mapping</p>
+                        <div class="row g-2">
+                            <div class="col-sm-6">
+                                <label for="custom_date_column" class="form-label small">Date Column Name</label>
+                                <input type="text" class="form-control form-control-sm" id="custom_date_column" name="custom_date_column" placeholder="e.g. Date or Txn Date">
+                            </div>
+                            <div class="col-sm-6">
+                                <label for="custom_date_format" class="form-label small">Date Format</label>
+                                <select class="form-select form-select-sm" id="custom_date_format" name="custom_date_format">
+                                    <option value="dd/mm/yyyy">DD/MM/YYYY</option>
+                                    <option value="dd-mm-yyyy">DD-MM-YYYY</option>
+                                    <option value="yyyy-mm-dd">YYYY-MM-DD</option>
+                                    <option value="mm/dd/yyyy">MM/DD/YYYY</option>
+                                </select>
+                            </div>
+                            <div class="col-sm-8">
+                                <label for="custom_narration_column" class="form-label small">Narration / Description Column</label>
+                                <input type="text" class="form-control form-control-sm" id="custom_narration_column" name="custom_narration_column" placeholder="e.g. Particulars or Narration">
+                            </div>
+                            <div class="col-sm-4">
+                                <label for="custom_preamble_rows" class="form-label small">Preamble Rows to Skip</label>
+                                <input type="number" class="form-control form-control-sm" id="custom_preamble_rows" name="custom_preamble_rows" value="0" min="0" max="30">
+                            </div>
+                            <div class="col-sm-6">
+                                <label for="custom_amount_mode" class="form-label small">Amount Layout</label>
+                                <select class="form-select form-select-sm" id="custom_amount_mode" name="custom_amount_mode">
+                                    <option value="split_columns">Separate Debit &amp; Credit Columns</option>
+                                    <option value="signed_amount">Single Signed Amount Column</option>
+                                </select>
+                            </div>
+                            <div class="col-sm-6">
+                                <label for="custom_ref_column" class="form-label small">Ref / UTR Column (optional)</label>
+                                <input type="text" class="form-control form-control-sm" id="custom_ref_column" name="custom_ref_column" placeholder="e.g. Chq./Ref.No.">
+                            </div>
+                            <div class="col-sm-6 custom-split-field">
+                                <label for="custom_debit_column" class="form-label small">Debit / Withdrawal Column</label>
+                                <input type="text" class="form-control form-control-sm" id="custom_debit_column" name="custom_debit_column" placeholder="e.g. Withdrawal (INR)">
+                            </div>
+                            <div class="col-sm-6 custom-split-field">
+                                <label for="custom_credit_column" class="form-label small">Credit / Deposit Column</label>
+                                <input type="text" class="form-control form-control-sm" id="custom_credit_column" name="custom_credit_column" placeholder="e.g. Deposit (INR)">
+                            </div>
+                            <div class="col-sm-6 custom-signed-field d-none">
+                                <label for="custom_amount_column" class="form-label small">Amount Column</label>
+                                <input type="text" class="form-control form-control-sm" id="custom_amount_column" name="custom_amount_column" placeholder="e.g. Amount">
+                            </div>
+                            <div class="col-sm-6 custom-signed-field d-none">
+                                <label for="custom_signed_debit_negative" class="form-label small">Debit Sign Convention</label>
+                                <select class="form-select form-select-sm" id="custom_signed_debit_negative" name="custom_signed_debit_negative">
+                                    <option value="1">Negative values are debits (-100.00)</option>
+                                    <option value="0">Positive values are debits (+100.00)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="statement_file" class="form-label">Statement CSV File</label>
+                        <input type="file" class="form-control" id="statement_file" name="statement_file" accept=".csv,text/csv" required>
+                        <div class="form-text small text-secondary mt-1">
+                            <i class="fas fa-shield-alt me-1 text-success"></i>
+                            Parsed strictly in server memory (never stored on disk). Max {{ max_file_mb }} MB · Max {{ max_rows }} rows · Debits only (credits shown as skipped).
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary w-100 rounded-pill py-2" id="uploadSubmitBtn">
+                        <i class="fas fa-magnifying-glass me-2"></i>Parse &amp; Stage for Review
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- ─── Saved Categorisation Rules ─── -->
+        <div class="col-lg-5">
+            <div class="fintech-card h-100">
+                <div class="fintech-card-title mb-3">
+                    <i class="fas fa-wand-magic-sparkles text-primary"></i>
+                    Saved Categorisation Rules ({{ rules|length }})
+                </div>
+                <p class="text-secondary small mb-3">
+                    Matched deterministically against statement narrations before falling back to <strong>Uncategorised</strong>.
+                </p>
+
+                <form method="POST" action="{{ url_for('imports.create_rule') }}" class="row g-2 mb-3">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <div class="col-sm-5">
+                        <input type="text" name="pattern" class="form-control form-control-sm" placeholder="Keyword (e.g. BLINKIT)" maxlength="120" required>
+                    </div>
+                    <div class="col-sm-4">
+                        <select name="category" class="form-select form-select-sm" required>
+                            <option value="">Category…</option>
+                            {% for cat in categories %}
+                            <option value="{{ cat }}">{{ cat }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-sm-3">
+                        <button type="submit" class="btn btn-outline-primary btn-sm w-100 rounded-pill">Save</button>
+                    </div>
+                </form>
+
+                {% if rules %}
+                <div class="table-responsive" style="max-height: 260px; overflow-y: auto;">
+                    <table class="table-fintech w-100">
+                        <thead>
+                            <tr>
+                                <th>Keyword</th>
+                                <th>Category</th>
+                                <th class="text-end">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for rule in rules %}
+                            <tr>
+                                <td class="small fw-bold">{{ rule.pattern }}</td>
+                                <td>
+                                    <span class="badge rounded-pill" style="background:var(--primary-light);color:var(--primary);">
+                                        {{ rule.category }}
+                                    </span>
+                                </td>
+                                <td class="text-end">
+                                    <form method="POST" action="{{ url_for('imports.delete_rule', rule_id=rule.id) }}" style="display:inline;">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                        <button type="submit" class="btn btn-sm btn-light rounded-pill" title="Delete rule">
+                                            <i class="fas fa-trash text-danger"></i>
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-4 text-secondary small">
+                    No rules yet. Add one above or check <strong>Always apply</strong> on the review screen.
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── Recent Import Batches ─── -->
+    <div class="fintech-card p-0">
+        <div class="px-4 py-3 border-bottom border-card-divider d-flex align-items-center justify-content-between">
+            <div class="fintech-card-title">
+                <i class="fas fa-history text-primary"></i>
+                Recent Import Batches
+            </div>
+        </div>
+        {% if batches %}
+        <div class="table-responsive">
+            <table class="table-fintech w-100">
+                <thead>
+                    <tr>
+                        <th>Batch</th>
+                        <th>File</th>
+                        <th>Status</th>
+                        <th>Summary</th>
+                        <th>Created</th>
+                        <th class="text-end">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for b in batches %}
+                    <tr>
+                        <td class="small fw-bold">#{{ b.id }}</td>
+                        <td class="small">{{ b.original_filename }}</td>
+                        <td>
+                            {% if b.status == 'staged' %}
+                            <span class="badge rounded-pill bg-warning text-dark">Staged</span>
+                            {% elif b.status == 'confirmed' %}
+                            <span class="badge rounded-pill bg-success">Confirmed</span>
+                            {% else %}
+                            <span class="badge rounded-pill bg-secondary">Undone</span>
+                            {% endif %}
+                        </td>
+                        <td class="small text-secondary">
+                            {% if b.status == 'staged' %}
+                                {{ b.ready_count }} ready · {{ b.duplicate_manual_count }} manual dup · {{ b.skipped_credit_count }} credits · {{ b.invalid_count }} invalid
+                            {% else %}
+                                {{ b.imported_count }} imported · {{ b.skipped_count }} skipped
+                            {% endif %}
+                        </td>
+                        <td class="small text-secondary">{{ b.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                        <td class="text-end">
+                            <a href="{{ url_for('imports.review_batch', batch_id=b.id) }}" class="btn btn-light btn-sm rounded-pill">
+                                {% if b.status == 'staged' %}Review{% else %}View{% endif %}
+                            </a>
+                            {% if b.status == 'confirmed' %}
+                            <form method="POST" action="{{ url_for('imports.undo_batch', batch_id=b.id) }}" style="display:inline;" onsubmit="return confirm('Undo this entire import batch and delete its expenses?');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <button type="submit" class="btn btn-outline-danger btn-sm rounded-pill">Undo</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-center py-5 text-secondary small">
+            No import batches yet. Upload a CSV above to stage your first bank statement.
+        </div>
+        {% endif %}
+    </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    (function () {
+        var profileSelect = document.getElementById('bank_profile');
+        var descEl = document.getElementById('formatDescription');
+        var customPanel = document.getElementById('customMappingPanel');
+        var modeSelect = document.getElementById('custom_amount_mode');
+        var splitFields = document.querySelectorAll('.custom-split-field');
+        var signedFields = document.querySelectorAll('.custom-signed-field');
+
+        function syncProfileUI() {
+            var opt = profileSelect.options[profileSelect.selectedIndex];
+            descEl.textContent = opt ? (opt.dataset.desc || '') : '';
+            if (profileSelect.value === 'custom') {
+                customPanel.classList.remove('d-none');
+            } else {
+                customPanel.classList.add('d-none');
+            }
+        }
+
+        function syncAmountModeUI() {
+            var isSigned = modeSelect.value === 'signed_amount';
+            splitFields.forEach(function (el) { el.classList.toggle('d-none', isSigned); });
+            signedFields.forEach(function (el) { el.classList.toggle('d-none', !isSigned); });
+        }
+
+        if (profileSelect) {
+            profileSelect.addEventListener('change', syncProfileUI);
+            syncProfileUI();
+        }
+        if (modeSelect) {
+            modeSelect.addEventListener('change', syncAmountModeUI);
+            syncAmountModeUI();
+        }
+    })();
+</script>
+{% endblock %}

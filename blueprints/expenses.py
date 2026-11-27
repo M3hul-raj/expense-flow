@@ -5,6 +5,8 @@ Routes: /add, /view, /edit/<id>, /delete/<id>
 Blueprint name: 'expenses'
 Endpoint prefix: expenses.<function_name>
 """
+import csv
+import io
 import re as _re
 import logging
 import random
@@ -12,14 +14,14 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from flask import (
     Blueprint, render_template, request, redirect,
-    session, flash, url_for,
+    session, flash, url_for, make_response,
 )
 from models import db, Expense
 from utils import (
     is_logged_in, get_current_year_month, get_user_budget,
     get_monthly_spending, get_user_expenses_sorted, TIPS,
     MAX_EXPENSE_RUPEES, parse_rupees_to_paise, paise_to_rupees_input,
-    commit_session,
+    commit_session, sanitize_csv_cell, VALID_CATEGORIES, VALID_METHODS,
 )
 
 logger = logging.getLogger('expenseflow')
@@ -51,14 +53,7 @@ def _parse_expense_amount(amount_raw, *, require_non_empty=False):
     return None, 'Please enter a valid positive amount.', 'error'
 
 
-# ── Shared validation sets ────────────────────────────────────────────────────
-VALID_CATEGORIES = {
-    'Food', 'Transport', 'Shopping', 'Entertainment', 'Health',
-    'Utilities', 'Education', 'Travel', 'Personal Care', 'Home', 'Insurance', 'Other'
-}
-VALID_METHODS = {
-    'Cash', 'UPI', 'Credit Card', 'Debit Card', 'Net Banking', 'Digital Wallet', 'Other'
-}
+# ── Shared validation sets imported from utils.py ─────────────────────────────
 
 
 # ── Add expense ───────────────────────────────────────────────────────────────
@@ -298,3 +293,32 @@ def delete_expense(expense_id):
     flash('Expense deleted successfully!', 'success')
 
     return redirect(url_for('expenses.view_expense'))
+
+
+@expenses_bp.route('/export/csv')
+def export_csv():
+    """Export all expenses for the logged-in user as a formula-injection-safe CSV."""
+    if not is_logged_in():
+        flash('Please log in to export expenses.', 'error')
+        return redirect(url_for('auth.login'))
+
+    user_id = session['user_id']
+    expenses_obj = get_user_expenses_sorted(user_id)
+
+    buf = io.StringIO(newline='')
+    writer = csv.writer(buf)
+    writer.writerow(['Date', 'Category', 'Description', 'Payment Method', 'Amount'])
+    for e in expenses_obj:
+        writer.writerow([
+            e.date.isoformat(),
+            sanitize_csv_cell(e.category),
+            sanitize_csv_cell(e.description or ''),
+            sanitize_csv_cell(e.payment_method or ''),
+            paise_to_rupees_input(e.amount_paise),
+        ])
+
+    response = make_response(buf.getvalue())
+    response.headers['Content-Type'] = 'text/csv; charset=utf-8'
+    response.headers['Content-Disposition'] = 'attachment; filename="expenseflow_export.csv"'
+    response.headers['Cache-Control'] = 'no-store'
+    return response

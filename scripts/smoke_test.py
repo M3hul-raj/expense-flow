@@ -15,6 +15,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 
 
@@ -85,6 +86,38 @@ class _SmokeClient:
         except urllib.error.HTTPError as err:
             return err.code, dict(err.headers.items()), err.headers.get_all('Set-Cookie') or [], err.read()
 
+    def post_multipart(self, path, fields, files, referer_path=None, follow_redirects=True):
+        """POST multipart/form-data (for CSV file uploads) using stdlib only."""
+        boundary = f'----ExpenseFlowSmoke{uuid.uuid4().hex}'
+        parts = []
+        for name, value in fields.items():
+            parts.append(
+                f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f'{value}\r\n'.encode('utf-8')
+            )
+        for field_name, (filename, content_bytes, content_type) in files.items():
+            parts.append(
+                f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+                f'Content-Type: {content_type}\r\n\r\n'.encode('utf-8')
+                + content_bytes
+                + b'\r\n'
+            )
+        parts.append(f'--{boundary}--\r\n'.encode('utf-8'))
+        body = b''.join(parts)
+
+        headers = {'Content-Type': f'multipart/form-data; boundary={boundary}'}
+        if referer_path is not None:
+            headers['Referer'] = self.url(referer_path)
+        req = urllib.request.Request(self.url(path), data=body, headers=headers, method='POST')
+        opener = self.follow_opener if follow_redirects else self.raw_opener
+        try:
+            with opener.open(req, timeout=20) as resp:
+                return resp.status, dict(resp.headers.items()), resp.headers.get_all('Set-Cookie') or [], resp.read()
+        except urllib.error.HTTPError as err:
+            return err.code, dict(err.headers.items()), err.headers.get_all('Set-Cookie') or [], err.read()
+
 
 def _parse_form(html_bytes):
     parser = _FormParser()
@@ -126,6 +159,8 @@ def run_smoke_test(base_url, smoke_user, smoke_pass):
     client = _SmokeClient(base_url)
     results = []
     created_expense_id = None
+    created_batch_id = None
+    batch_confirmed = False
 
     def record(name, ok, detail=''):
         status = 'PASS' if ok else 'FAIL'
@@ -324,8 +359,105 @@ def run_smoke_test(base_url, smoke_user, smoke_pass):
         )
         record('POST /edit_profile rejects email change without current password', ep_ok)
 
+        # 9. Statement import -> review -> confirm -> undo flow (using synthetic CSV)
+        st_imp_get, _, _, imp_form = client.get('/imports')
+        imp_csrf = _first_csrf(imp_form)
+        record('GET /imports loads (200) with CSRF token', st_imp_get == 200 and bool(imp_csrf), f'status={st_imp_get}')
+
+        smoke_marker = f'SMOKE_IMPORT_{uuid.uuid4().hex[:8]}'
+        synthetic_csv = (
+            'ExpenseFlow Smoke Statement\n'
+            'Account,Demo\n'
+            'Currency,INR\n'
+            'Date,Particulars,Chq./Ref.No.,Withdrawal (INR),Deposit (INR),Balance (INR)\n'
+            f'01/10/2026,UPI/DR/1001/{smoke_marker}_A,REF1,45.50,,9954.50\n'
+            f'02/10/2026,UPI/DR/1002/{smoke_marker}_B,REF2,54.50,,9900.00\n'
+            '03/10/2026,NEFT/CR/1003/SALARY CREDIT,REF3,,5000.00,14900.00\n'
+            '31/02/2026,INVALID DATE ROW,,10.00,,14890.00\n'
+        ).encode('utf-8')
+
+        st_up, hdr_up, _, _ = client.post_multipart(
+            '/imports',
+            {'bank_profile': 'indian_standard', 'csrf_token': imp_csrf},
+            {'statement_file': ('smoke_statement.csv', synthetic_csv, 'text/csv')},
+            referer_path='/imports',
+            follow_redirects=False,
+        )
+        loc_up = hdr_up.get('Location', '')
+        batch_match = re.search(r'/imports/(\d+)', loc_up)
+        if batch_match:
+            created_batch_id = int(batch_match.group(1))
+
+        st_rev, _, _, rev_body = client.get(loc_up or '/imports')
+        rev_txt = rev_body.decode('utf-8', errors='replace')
+        _, _, _, view_staged = client.get('/view')
+        view_staged_txt = view_staged.decode('utf-8', errors='replace')
+        staged_ok = (
+            st_up == 302
+            and created_batch_id is not None
+            and st_rev == 200
+            and smoke_marker in rev_txt
+            and 'Invalid Rows (1)' in rev_txt
+            and 'Skipped Credits / Deposits (1)' in rev_txt
+            and smoke_marker not in view_staged_txt
+        )
+        record('POST /imports stages CSV without writing expenses', staged_ok, f'batch_id={created_batch_id}')
+
+        if created_batch_id is not None:
+            conf_csrf = _first_csrf(rev_body)
+            st_conf, _, _, conf_body = client.post(
+                f'/imports/{created_batch_id}/confirm',
+                {'csrf_token': conf_csrf},
+                referer_path=f'/imports/{created_batch_id}',
+                follow_redirects=True,
+            )
+            conf_txt = conf_body.decode('utf-8', errors='replace')
+            _, _, _, view_conf = client.get('/view')
+            view_conf_txt = view_conf.decode('utf-8', errors='replace')
+            confirm_ok = (
+                st_conf == 200
+                and 'Batch Confirmed' in conf_txt
+                and f'{smoke_marker}_A' in view_conf_txt
+                and f'{smoke_marker}_B' in view_conf_txt
+                and 'SALARY CREDIT' not in view_conf_txt
+            )
+            if confirm_ok:
+                batch_confirmed = True
+            record('POST /imports/<id>/confirm writes debits atomically', confirm_ok)
+
+            undo_csrf = _first_csrf(conf_body)
+            st_undo, _, _, undo_body = client.post(
+                f'/imports/{created_batch_id}/undo',
+                {'csrf_token': undo_csrf},
+                referer_path=f'/imports/{created_batch_id}',
+                follow_redirects=True,
+            )
+            undo_txt = undo_body.decode('utf-8', errors='replace')
+            _, _, _, view_after_undo = client.get('/view')
+            view_after_undo_txt = view_after_undo.decode('utf-8', errors='replace')
+            undo_ok = (
+                st_undo == 200
+                and 'Batch Undone' in undo_txt
+                and smoke_marker not in view_after_undo_txt
+            )
+            if undo_ok:
+                batch_confirmed = False
+            record('POST /imports/<id>/undo removes imported batch atomically', undo_ok)
+
     finally:
-        # 9. Always delete the created test expense
+        # 10. Cleanup any un-undone smoke batch or created test expense
+        if created_batch_id is not None and batch_confirmed:
+            try:
+                _, _, _, rev_cleanup = client.get(f'/imports/{created_batch_id}')
+                u_csrf = _first_csrf(rev_cleanup)
+                client.post(
+                    f'/imports/{created_batch_id}/undo',
+                    {'csrf_token': u_csrf},
+                    referer_path=f'/imports/{created_batch_id}',
+                    follow_redirects=True,
+                )
+            except Exception:
+                pass
         if created_expense_id is not None:
             try:
                 _, _, _, view_cleanup = client.get('/view')
