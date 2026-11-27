@@ -19,6 +19,6 @@ csrf = CSRFProtect()
 # per-route.  Wired to the app in create_app().
 limiter = Limiter(
     key_func=get_remote_address,
-    default_limits=[],       # no blanket limit — only /login is restricted
+    default_limits=[],       # no blanket limit — applied to sensitive routes (/login, /imports POST)
     storage_uri='memory://', # in-process store (swap for Redis in prod)
 )

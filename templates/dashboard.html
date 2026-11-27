@@ -92,9 +92,14 @@
                 <p class="text-secondary mb-0 small">Here's your financial overview for {{ current_date.strftime('%B %Y') }}</p>
             </div>
         </div>
-        <a href="{{ url_for('expenses.add_expense') }}" class="btn btn-primary rounded-pill d-none d-md-inline-flex">
-            <i class="fas fa-plus me-2"></i>Add Expense
-        </a>
+        <div class="d-none d-md-flex gap-2">
+            <a href="{{ url_for('imports.index') }}" class="btn btn-outline-primary rounded-pill">
+                <i class="fas fa-file-import me-2"></i>Import CSV
+            </a>
+            <a href="{{ url_for('expenses.add_expense') }}" class="btn btn-primary rounded-pill">
+                <i class="fas fa-plus me-2"></i>Add Expense
+            </a>
+        </div>
     </div>
 
     <!-- ─── Budget Alert Banner ──────────────────────────────────── -->

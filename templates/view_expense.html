@@ -57,9 +57,14 @@
             <h1 class="fw-bold mb-1" style="font-size: 1.75rem;">Transactions</h1>
             <p class="text-secondary mb-0 small">{{ expenses|length }} records as of {{ current_date.strftime('%d %B %Y') }}</p>
         </div>
-        <a href="{{ url_for('expenses.add_expense') }}" class="btn btn-primary rounded-pill d-none d-sm-inline-flex">
-            <i class="fas fa-plus me-2"></i>Add Expense
-        </a>
+        <div class="d-none d-sm-flex gap-2">
+            <a href="{{ url_for('imports.index') }}" class="btn btn-outline-primary rounded-pill">
+                <i class="fas fa-file-import me-2"></i>Import CSV
+            </a>
+            <a href="{{ url_for('expenses.add_expense') }}" class="btn btn-primary rounded-pill">
+                <i class="fas fa-plus me-2"></i>Add Expense
+            </a>
+        </div>
     </div>
 
     <!-- ─── Summary Strip ─── -->
@@ -400,16 +405,24 @@
     }
 
 
+    function csvSafeCell(val) {
+        const s = String(val ?? '').replace(/\0/g, '');
+        const trimmedStart = s.replace(/^[\s\t\r\n]+/, '');
+        const isFormula = /^[=+\-@\t\r]/.test(s) || (trimmedStart.length > 0 && /^[=+\-@\t\r]/.test(trimmedStart));
+        const neutralized = isFormula ? ("'" + s) : s;
+        return '"' + neutralized.replace(/"/g, '""') + '"';
+    }
+
     function exportToCSV() {
         const headers = ['Date', 'Category', 'Description', 'Payment Method', 'Amount'];
         const csvRows = [headers.join(',')];
         filtered.forEach(r => {
             csvRows.push([
-                r.dataset.date,
-                r.dataset.category,
-                '"' + r.dataset.description.replace(/"/g, '""') + '"',
-                r.dataset.payment,
-                r.dataset.amount
+                csvSafeCell(r.dataset.date),
+                csvSafeCell(r.dataset.category),
+                csvSafeCell(r.dataset.description),
+                csvSafeCell(r.dataset.payment),
+                csvSafeCell(r.dataset.amount)
             ].join(','));
         });
         const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });

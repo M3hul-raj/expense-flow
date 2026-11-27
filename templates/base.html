@@ -81,6 +81,7 @@
                         <li class="nav-item"><a class="nav-link {% if request.endpoint == 'analytics.analytics' %}active{% endif %}" href="{{ url_for('analytics.analytics') }}">Analytics</a></li>
                         <li class="nav-item"><a class="nav-link {% if request.endpoint == 'expenses.view_expense' %}active{% endif %}" href="{{ url_for('expenses.view_expense') }}">Transactions</a></li>
                         <li class="nav-item"><a class="nav-link {% if request.endpoint == 'expenses.add_expense' %}active{% endif %}" href="{{ url_for('expenses.add_expense') }}">Add Record</a></li>
+                        <li class="nav-item"><a class="nav-link {% if request.blueprint == 'imports' %}active{% endif %}" href="{{ url_for('imports.index') }}">Import CSV</a></li>
                         <li class="nav-item"><a class="nav-link d-flex align-items-center gap-2 {% if request.endpoint == 'auth.edit_profile' %}active{% endif %}" href="{{ url_for('auth.edit_profile') }}"><span class="avatar avatar-sm avatar-{{ (session.get('avatar', 'avatar_1') | replace('avatar_', '')) }}"></span>Profile</a></li>
                         <li class="nav-item ms-lg-1">
                             <button class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode">
@@ -114,6 +115,7 @@
                     <li class="nav-item"><a class="nav-link {% if request.endpoint == 'analytics.analytics' %}active{% endif %}" href="{{ url_for('analytics.analytics') }}">Analytics</a></li>
                     <li class="nav-item"><a class="nav-link {% if request.endpoint == 'expenses.view_expense' %}active{% endif %}" href="{{ url_for('expenses.view_expense') }}">Transactions</a></li>
                     <li class="nav-item"><a class="nav-link {% if request.endpoint == 'expenses.add_expense' %}active{% endif %}" href="{{ url_for('expenses.add_expense') }}">Add Record</a></li>
+                    <li class="nav-item"><a class="nav-link {% if request.blueprint == 'imports' %}active{% endif %}" href="{{ url_for('imports.index') }}">Import CSV</a></li>
                     <li class="nav-item"><a class="nav-link d-flex align-items-center gap-2 {% if request.endpoint == 'auth.edit_profile' %}active{% endif %}" href="{{ url_for('auth.edit_profile') }}"><span class="avatar avatar-sm avatar-{{ (session.get('avatar', 'avatar_1') | replace('avatar_', '')) }}"></span>Profile</a></li>
                     <li class="nav-item mt-3 mb-2"><a class="nav-outline-btn w-100 text-center" href="{{ url_for('auth.logout') }}">Sign Out</a></li>
                 {% else %}

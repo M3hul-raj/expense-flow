@@ -30,6 +30,7 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 
 ### Core — Expense Management
 - **Add Expenses** — Quick-add shortcuts, category/payment method selection, date picker with future-date prevention
+- **Bank CSV Statement Import** — In-memory CSV parsing (`2 MB` / `2,000` row caps, UTF-8/UTF-16/CP1252) via declarative bank format configs, staging review screen in Jinja, idempotent SHA-256 deduplication preserving identical same-day repeats, manual-expense duplicate flags, deterministic `"Always apply"` keyword rules (`else Uncategorised`), and atomic single-transaction Confirm & Undo
 - **Edit & Delete** — Full CRUD with server-side validation on every field
 - **View All Transactions** — Searchable, filterable, sortable table with pagination
 - **Multi-filter System** — Filter by category, month, payment method, date range, and amount range simultaneously
@@ -47,7 +48,7 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 - **Dashboard Overview** — 4 stat cards (Total Spent, This Month, True Velocity Daily Average, Top Category), category donut chart, 6-month spending trend line chart
 - **True Velocity Analytics** — The daily average dynamically tracks exactly how many days have passed in the current month to enforce real-time budgeting accountability.
 - **PDF Export** — Professional ReportLab-generated PDF with indigo header, summary stats, category breakdown table, full paginated expense list, and page numbers
-- **CSV Export** — Client-side JavaScript CSV generation with one-click download
+- **CSV Export** — Formula-injection-safe client-side filtered CSV export and server-side `/export/csv` download
 
 ### Design & UX
 - **Flawless Dark & Light Modes** — Precision-engineered themes that respect OS preferences with a dedicated manual toggle switch
@@ -71,13 +72,13 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 
 ### Security & Infrastructure
 - **CSRF Protection** — All POST forms validated via Flask-WTF CSRF tokens
-- **Login Rate Limiting** — Flask-Limiter enforces 5 attempts per 15 minutes on `/login` POST to prevent brute-force attacks
-- **SQLAlchemy ORM & Migrations** — SQLite and PostgreSQL 16 parity via Alembic (`0001`–`0006`), `BigInteger` paise money columns, `CHECK`/`NOT NULL` constraints, and `ON DELETE CASCADE` foreign keys
+- **Rate Limiting** — Flask-Limiter enforces 5 POST attempts per 15 minutes on `/login` and 10 uploads per 15 minutes on `/imports` POST
+- **SQLAlchemy ORM & Migrations** — SQLite and PostgreSQL 16 parity via Alembic (`0001`–`0007`), `BigInteger` paise money columns, `CHECK`/`NOT NULL` constraints, `ON DELETE CASCADE` foreign keys, and statement-import staging/rule tables
 - **Application Factory** — `create_app()` pattern supporting `production`, `development`, and `testing` configurations (with per-connection SQLite `PRAGMA foreign_keys=ON`)
-- **Blueprint Architecture** — Routes split into 5 blueprints (`auth`, `expenses`, `budget`, `analytics`, `main`) for modularity
+- **Blueprint Architecture** — Routes split into 6 blueprints (`auth`, `expenses`, `budget`, `analytics`, `imports`, `main`) for modularity
 - **Indexed Queries** — Composite `(user_id, date, id)` ordering index, half-open `DATE` range queries, and functional `lower(username)` / `lower(email)` unique indexes
-- **Server-side Validation** — `Decimal` (`ROUND_HALF_UP`) money parsing, case-insensitive auth queries, whitelist validation for categories/payment methods/avatars, password re-authentication for email changes, and future-date blocking
-- **Automated Testing** — 166 pytest tests covering CRUD, budget logic, validation, CSRF enforcement, security regressions, Alembic migrations, and database constraints
+- **Server-side Validation** — `Decimal` (`ROUND_HALF_UP`) money parsing, case-insensitive auth queries, whitelist validation for categories/payment methods/avatars, password re-authentication for email changes, untrusted CSV HTML/formula-injection neutralization, and future-date blocking
+- **Automated Testing** — 189 pytest tests covering CRUD, budget logic, validation, CSRF enforcement, security regressions, Alembic migrations, database constraints, and CSV statement import
 - **CI/CD** — GitHub Actions workflow runs `pytest tests/ -v` across Python 3.10–3.13 (SQLite) and PostgreSQL 16 on every push and PR to `main`
 - **Structured Logging** — All events logged to `expenseflow.log` with timestamps
 - **Environment Configuration** — Fail-fast `EXPENSEFLOW_SECRET_KEY` (32+ chars) in production; optional `EXPENSEFLOW_ENV` and `EXPENSEFLOW_DATABASE_URI`
@@ -122,7 +123,7 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 | **Security** | Flask-WTF (CSRF), Flask-Limiter (rate limiting) |
 | **Database** | SQLite & PostgreSQL 16 (`psycopg` v3), Alembic migrations |
 | **Authentication** | Werkzeug security (pbkdf2 password hashing) |
-| **Testing** | pytest (166 tests), GitHub Actions CI (Python 3.10–3.13 + PostgreSQL 16) |
+| **Testing** | pytest (189 tests), GitHub Actions CI (Python 3.10–3.13 + PostgreSQL 16) |
 | **Containers** | Docker Compose (`web` Flask/Gunicorn + `db` PostgreSQL 16) |
 | **Frontend** | HTML5, CSS3, JavaScript, Jinja2 templating |
 | **UI Framework** | Bootstrap 5.3, Font Awesome 6.4 |
@@ -251,40 +252,47 @@ expense-flow/
 │   └── ci.yml                  # GitHub Actions CI (SQLite 3.10–3.13 + PostgreSQL 16)
 ├── alembic/
 │   ├── env.py                  # Alembic environment (batch mode on SQLite)
-│   └── versions/               # Schema migrations (0001_baseline .. 0006_constraints_case_indexes)
+│   └── versions/               # Schema migrations (0001_baseline .. 0007_statement_import)
 ├── alembic.ini                 # Alembic configuration
 ├── app.py                      # Application factory (create_app)
 ├── compose.yaml                # Docker Compose (Gunicorn web + PostgreSQL 16)
 ├── Dockerfile                  # Container build for web service
 ├── extensions.py               # Flask extension instances (CSRF, Limiter)
-├── models.py                   # SQLAlchemy models (User, Expense, Budget)
-├── utils.py                    # Shared helpers, Decimal/paise utilities, commit_session
+├── models.py                   # SQLAlchemy models (User, Expense, Budget, ImportBatch, ImportRow, CategoryRule)
+├── statement_import.py         # Bank CSV mapping configs, in-memory parser, dedupe, deterministic rules
+├── utils.py                    # Shared helpers, Decimal/paise utilities, CSV sanitization, commit_session
 ├── requirements*.in / *.lock   # Universal uv dependency lockfiles (base + postgres)
 ├── blueprints/
 │   ├── __init__.py
 │   ├── auth.py                 # Auth routes (login, register, dashboard, profile)
-│   ├── expenses.py             # Expense CRUD routes (add, view, edit, delete)
+│   ├── expenses.py             # Expense CRUD & CSV export routes (add, view, edit, delete, export/csv)
 │   ├── budget.py               # Budget management routes
 │   ├── analytics.py            # Analytics dashboard and PDF export
+│   ├── imports.py              # Statement import staging, review, rules, confirm, and undo
 │   └── main.py                 # PWA routes (service worker, manifest, offline)
 ├── deploy/
 │   └── pa_deploy.sh            # Safe PythonAnywhere deploy (--stamp / --upgrade-to)
-├── docs/learning/
-│   └── stage-1b.md             # Stage 1B engineering notes
+├── docs/
+│   ├── RESUME_FACTS.md         # Verifiable claim -> command engineering reference
+│   └── learning/
+│       └── stage-1b.md         # Stage 1B engineering notes
 ├── scripts/
-│   ├── smoke_test.py           # End-to-end HTTP smoke test
+│   ├── smoke_test.py           # Stdlib end-to-end HTTP smoke test (incl. import -> confirm -> undo)
 │   └── verify_migration.py     # Pre/post migration audit & paise-conservation check
 ├── tests/
 │   ├── conftest.py             # Shared pytest fixtures (SQLite or EXPENSEFLOW_TEST_DATABASE_URI)
 │   ├── test_app.py             # 27 functional tests (CRUD, budget, Decimal, CSRF)
-│   ├── test_migrations.py      # 36 Alembic migration & EXPLAIN query-plan tests
+│   ├── test_migrations.py      # 38 Alembic migration & EXPLAIN query-plan tests
 │   ├── test_migration_verification.py # 4 audit & paise-conservation tests
-│   └── test_regressions.py     # 99 regression tests (security, constraints, case auth, SW)
+│   ├── test_regressions.py     # 99 regression tests (security, constraints, case auth, SW)
+│   └── test_statement_import.py # 21 statement import, dedupe, rules, atomicity, security & smoke tests
 ├── static/
 │   ├── main.css                # Design system (fintech theme)
 │   ├── avatars.css             # Avatar styling
 │   ├── sw.js                   # Service worker (PWA caching)
 │   ├── manifest.json           # PWA web app manifest
+│   ├── samples/
+│   │   └── synthetic_indian_bank_statement.csv # Synthetic Indian bank CSV sample fixture
 │   └── icons/
 │       ├── icon-192x192.png    # PWA icon (small)
 │       └── icon-512x512.png    # PWA icon (large)
@@ -298,6 +306,8 @@ expense-flow/
 │   ├── view_expense.html       # Transactions list
 │   ├── add_expense.html        # Add expense form
 │   ├── edit_expense.html       # Edit expense form
+│   ├── import_upload.html      # Statement CSV upload, recent batches & saved rules
+│   ├── import_review.html      # Staging review, duplicate flags, invalid rows, confirm & undo
 │   ├── set_budget.html         # Budget configuration
 │   ├── edit_profile.html       # Profile management
 │   ├── offline.html            # PWA offline fallback

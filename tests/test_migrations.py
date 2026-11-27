@@ -1078,10 +1078,6 @@ class TestM5ConstraintsAndCaseIndexes:
             assert 'ck_budget_amount_paise_positive' in bud_cks
 
             with engine.connect() as conn:
-                ctx = MigrationContext.configure(
-                    conn, opts={'compare_type': True, 'compare_server_default': True}
-                )
-                assert compare_metadata(ctx, db.metadata) == []
                 if not is_postgres:
                     idx_names = {
                         r[0]
@@ -1134,6 +1130,12 @@ class TestM5ConstraintsAndCaseIndexes:
             assert {i['name'] for i in insp_down.get_indexes('user')} >= {'ix_user_username', 'ix_user_email'}
 
             command.upgrade(cfg, '0006_constraints_case_indexes')
+            command.upgrade(cfg, 'head')
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                assert compare_metadata(ctx, db.metadata) == []
         finally:
             if is_postgres:
                 with engine.begin() as conn:
@@ -1156,7 +1158,6 @@ class TestM5ConstraintsAndCaseIndexes:
         try:
             insp = sa.inspect(engine)
             assert insp.get_unique_constraints('user') == []
-            assert TestSchemaReconciliation._unexplained_diffs(engine) == []
             assert compare_reports(before, audit_database(uri)) == []
 
             with engine.connect() as conn:
@@ -1178,6 +1179,8 @@ class TestM5ConstraintsAndCaseIndexes:
 
             command.downgrade(cfg, '0005_money_paise')
             command.upgrade(cfg, '0006_constraints_case_indexes')
+            command.upgrade(cfg, 'head')
+            assert TestSchemaReconciliation._unexplained_diffs(engine) == []
             assert compare_reports(before, audit_database(uri)) == []
         finally:
             engine.dispose()
@@ -1232,3 +1235,130 @@ class TestM5ConstraintsAndCaseIndexes:
                 assert ver == '0005_money_paise'
         finally:
             engine.dispose()
+
+
+class TestStatementImportMigration:
+    """Tests for 0007_statement_import schema upgrade, downgrade, NULL-fingerprint semantics, and CASCADE."""
+
+    def test_0007_upgrade_and_downgrade_across_sqlite_and_postgres(self, tmp_path):
+        from datetime import date as py_date
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'm7_import.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, '0006_constraints_case_indexes')
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                       VALUES (1, 'impuser', 'imp@example.com', 'h1', CURRENT_TIMESTAMP, 'avatar_1')"""
+                ))
+                # Two manual expenses with NULL import_fingerprint must remain valid
+                conn.execute(sa.text(
+                    """INSERT INTO expense (user_id, date, category, amount_paise, payment_method, created_at)
+                       VALUES
+                       (1, :d1, 'Food', 1000, 'Cash', CURRENT_TIMESTAMP),
+                       (1, :d1, 'Food', 2000, 'UPI', CURRENT_TIMESTAMP)"""
+                ), {'d1': py_date(2026, 10, 1) if is_postgres else '2026-10-01'})
+                if is_postgres:
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('"user"', 'id'), 1)"""))
+                    conn.execute(sa.text("""SELECT setval(pg_get_serial_sequence('expense', 'id'), 2)"""))
+
+            command.upgrade(cfg, '0007_statement_import')
+            insp = sa.inspect(engine)
+            assert {'import_batch', 'import_row', 'category_rule'}.issubset(set(insp.get_table_names()))
+            exp_cols = {c['name'] for c in insp.get_columns('expense')}
+            assert {'import_batch_id', 'import_fingerprint'}.issubset(exp_cols)
+            assert 'uq_expense_user_import_fingerprint' in {u['name'] for u in insp.get_unique_constraints('expense')}
+            assert 'uq_category_rule_user_pattern' in {u['name'] for u in insp.get_unique_constraints('category_rule')}
+
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                diffs = compare_metadata(ctx, db.metadata)
+                if not is_postgres:
+                    diffs = [
+                        d for d in diffs
+                        if not (isinstance(d, tuple) and d[0] == 'add_index' and d[1].name in {'ix_user_username_lower', 'ix_user_email_lower'})
+                    ]
+                assert diffs == []
+
+            # Duplicate non-NULL import_fingerprint for same user is rejected at DB level
+            fp = 'a' * 64
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO expense (user_id, date, category, amount_paise, payment_method, created_at, import_fingerprint)
+                       VALUES (1, :d1, 'Food', 500, 'UPI', CURRENT_TIMESTAMP, :fp)"""
+                ), {'d1': py_date(2026, 10, 2) if is_postgres else '2026-10-02', 'fp': fp})
+
+            with pytest.raises(sa.exc.IntegrityError):
+                with engine.begin() as conn:
+                    conn.execute(sa.text(
+                        """INSERT INTO expense (user_id, date, category, amount_paise, payment_method, created_at, import_fingerprint)
+                           VALUES (1, :d1, 'Food', 500, 'UPI', CURRENT_TIMESTAMP, :fp)"""
+                    ), {'d1': py_date(2026, 10, 2) if is_postgres else '2026-10-02', 'fp': fp})
+
+            # Another manual NULL-fingerprint expense still succeeds alongside imported ones
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO expense (user_id, date, category, amount_paise, payment_method, created_at)
+                       VALUES (1, :d1, 'Food', 750, 'Cash', CURRENT_TIMESTAMP)"""
+                ), {'d1': py_date(2026, 10, 3) if is_postgres else '2026-10-03'})
+
+            # Downgrade removes 0007 tables/columns while preserving all expenses
+            command.downgrade(cfg, '0006_constraints_case_indexes')
+            insp_down = sa.inspect(engine)
+            assert not ({'import_batch', 'import_row', 'category_rule'} & set(insp_down.get_table_names()))
+            assert 'import_fingerprint' not in {c['name'] for c in insp_down.get_columns('expense')}
+            with engine.connect() as conn:
+                assert conn.execute(sa.text('SELECT COUNT(*) FROM expense')).scalar_one() == 4
+
+            command.upgrade(cfg, '0007_statement_import')
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+            engine.dispose()
+
+    def test_0007_on_delete_cascade_removes_import_data_when_user_deleted(self, app, user):
+        from models import CategoryRule, ImportBatch, ImportRow
+
+        with app.app_context():
+            b = ImportBatch(
+                user_id=user.id,
+                bank_profile='signed_iso',
+                original_filename='test.csv',
+                file_sha256='0' * 64,
+                detected_encoding='utf-8',
+                status='staged',
+            )
+            db.session.add(b)
+            db.session.flush()
+            db.session.add(ImportRow(
+                batch_id=b.id,
+                user_id=user.id,
+                line_number=2,
+                row_status='ready',
+                amount_paise=1000,
+            ))
+            db.session.add(CategoryRule(
+                user_id=user.id,
+                pattern='TEST',
+                pattern_normalized='TEST',
+                category='Food',
+            ))
+            db.session.commit()
+
+            db.session.execute(sa.text('DELETE FROM "user" WHERE id = :uid'), {'uid': user.id})
+            db.session.commit()
+
+            assert ImportBatch.query.filter_by(user_id=user.id).count() == 0
+            assert ImportRow.query.filter_by(user_id=user.id).count() == 0
+            assert CategoryRule.query.filter_by(user_id=user.id).count() == 0

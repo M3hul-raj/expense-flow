@@ -116,6 +116,7 @@ def create_app(config_name=None, database_uri=None):
         )
         db_uri = normalize_database_uri(raw_uri)
         app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
+        app.config['RATELIMIT_ENABLED'] = True
 
     if db_uri.startswith('postgresql+'):
         app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {'pool_pre_ping': True}
@@ -134,12 +135,14 @@ def create_app(config_name=None, database_uri=None):
     from blueprints.expenses  import expenses_bp
     from blueprints.budget    import budget_bp
     from blueprints.analytics import analytics_bp
+    from blueprints.imports   import imports_bp
 
     app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(expenses_bp)
     app.register_blueprint(budget_bp)
     app.register_blueprint(analytics_bp)
+    app.register_blueprint(imports_bp)
 
     # ── Error handlers ────────────────────────────────────────────────────
     @app.errorhandler(404)
