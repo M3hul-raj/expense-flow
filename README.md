@@ -87,29 +87,29 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 ## Screenshots
 
 <p align="center">
-  <img src="static/screenshots/dashboard.png" width="800" alt="ExpenseFlow Dashboard (Save your screenshot as dashboard.png in static/screenshots/)">
+  <img src="static/screenshots/dashboard.png" width="800" alt="ExpenseFlow dark-mode dashboard showing summary stat cards, Monthly Budget progress bar, Spending by Category donut chart, and 6-month Spending Trend line chart">
 </p>
 
 ### Detailed Views
 
 <details>
 <summary><b>1. Landing Page</b> (Click to expand)</summary>
-<img src="static/screenshots/landing.png" alt="Save your screenshot as landing.png in static/screenshots/">
+<img src="static/screenshots/landing.png" alt="ExpenseFlow dark-mode landing page featuring hero preview cards, feature highlights, and a 3-step onboarding flow">
 </details>
 
 <details>
 <summary><b>2. Analytics & Heatmap</b> (Click to expand)</summary>
-<img src="static/screenshots/analytics.png" alt="Save your screenshot as analytics.png in static/screenshots/">
+<img src="static/screenshots/analytics.png" alt="ExpenseFlow 9-section Spending Analytics view with month-over-month comparison, Category Breakdown, Budget vs Actual chart, Daily Spending bars, Payment Methods, Top 5 Expenses, and Spending Calendar heatmap">
 </details>
 
 <details>
 <summary><b>3. Transactions & Filters</b> (Click to expand)</summary>
-<img src="static/screenshots/transactions.png" alt="Save your screenshot as transactions.png in static/screenshots/">
+<img src="static/screenshots/transactions.png" alt="ExpenseFlow Transactions page showing search and multi-filter controls, Tip of the Day banner, PDF/CSV/Print actions, and sorted expense table with Filtered Total">
 </details>
 
 <details>
 <summary><b>4. Add Expense</b> (Click to expand)</summary>
-<img src="static/screenshots/add_expense.png" alt="Save your screenshot as add_expense.png in static/screenshots/">
+<img src="static/screenshots/add_expense.png" alt="ExpenseFlow Add New Expense page with Quick Add category presets, validated form inputs, and live Budget Status card">
 </details>
 
 ---
@@ -269,6 +269,8 @@ expense-flow/
 │   └── main.py                 # PWA routes (service worker, manifest, offline)
 ├── deploy/
 │   └── pa_deploy.sh            # Safe PythonAnywhere deploy (--stamp / --upgrade-to)
+├── docs/learning/
+│   └── stage-1b.md             # Stage 1B engineering notes
 ├── scripts/
 │   ├── smoke_test.py           # End-to-end HTTP smoke test
 │   └── verify_migration.py     # Pre/post migration audit & paise-conservation check
