@@ -10,9 +10,9 @@ If you are a developer looking to contribute or understand the codebase, this do
 
 ExpenseFlow is a production-grade, full-stack web application built on a modern Python backend (Flask) with a custom, highly interactive vanilla JavaScript/CSS frontend. It uses the **application factory pattern** (`create_app()`) with **Flask Blueprints** and strictly implements the **MVC (Model-View-Controller)** pattern through server-side rendering (SSR):
 
-*   **Model (`models.py`)**: Defines the SQLite database structure using SQLAlchemy ORM.
+*   **Model (`models.py` + `alembic/`)**: Defines the relational schema (`User`, `Expense`, `Budget`) using SQLAlchemy ORM and versioned Alembic migrations (`0001_baseline` through `0006_constraints_case_indexes`) across SQLite and PostgreSQL 16.
 *   **View (`templates/`, `static/`)**: Jinja2 HTML templates styled with a completely custom CSS design system (`main.css`), featuring dynamic JavaScript interactivity without heavy frontend frameworks.
-*   **Controller (`app.py` + `blueprints/`)**: The application factory in `app.py` wires extensions and registers 5 blueprints (`auth`, `expenses`, `budget`, `analytics`, `main`) that contain all route logic. Shared utilities live in `utils.py`, and extension instances (CSRF, rate limiter) are defined in `extensions.py` to avoid circular imports.
+*   **Controller (`app.py` + `blueprints/`)**: The application factory in `app.py` wires extensions, per-connection SQLite `PRAGMA foreign_keys=ON`, and registers 5 blueprints (`auth`, `expenses`, `budget`, `analytics`, `main`) that contain all route logic. Shared utilities (including `Decimal`/paise helpers and `commit_session()` rollback hygiene) live in `utils.py`, and extension instances (CSRF, rate limiter) are defined in `extensions.py` to avoid circular imports.
 
 ---
 
@@ -21,28 +21,38 @@ ExpenseFlow is a production-grade, full-stack web application built on a modern 
 ```text
 expense-flow/
 ├── .github/workflows/
-│   └── ci.yml                  # GitHub Actions CI: pytest on every push/PR to main.
-├── app.py                      # Application factory (create_app): config, extensions, blueprints.
-├── extensions.py               # Bare Flask extension instances (CSRFProtect, Limiter).
-├── models.py                   # SQLAlchemy database structure (User, Expense, Budget tables).
-├── utils.py                    # Shared helpers: is_logged_in, get_user_budget, budget history, TIPS.
-├── requirements.txt            # Python dependencies graph.
-├── DEVELOPER_GUIDE.md          # This documentation file.
+│   └── ci.yml                  # GitHub Actions CI: Python 3.10–3.13 (SQLite) + PostgreSQL 16
+├── alembic/
+│   ├── env.py                  # Alembic environment (batch rebuilds on SQLite)
+│   └── versions/               # Revisions 0001_baseline .. 0006_constraints_case_indexes
+├── alembic.ini                 # Alembic config
+├── app.py                      # Application factory (create_app): config, FK hook, blueprints
+├── compose.yaml                # Two-container dev stack (Gunicorn web + PostgreSQL 16)
+├── Dockerfile                  # Production-like container build
+├── extensions.py               # Bare Flask extension instances (CSRFProtect, Limiter)
+├── models.py                   # SQLAlchemy models + NAMING_CONVENTION (User, Expense, Budget)
+├── utils.py                    # Shared helpers, Decimal/paise conversions, commit_session
+├── requirements*.in / *.lock   # Universal uv lockfiles (base + postgres)
+├── DEVELOPER_GUIDE.md          # This documentation file
+├── docs/learning/stage-1b.md   # Stage 1B engineering notes
 ├── blueprints/
-│   ├── __init__.py             # Package marker.
-│   ├── auth.py                 # Auth routes: login, register, logout, dashboard, edit_profile.
-│   ├── expenses.py             # Expense CRUD: add, view, edit, delete.
-│   ├── budget.py               # Budget management: set_budget.
-│   ├── analytics.py            # Analytics dashboard (9 sections) and PDF export.
-│   └── main.py                 # PWA routes: /sw.js, /manifest.json, /offline.
+│   ├── __init__.py             # Package marker
+│   ├── auth.py                 # Auth routes: login, register, logout, dashboard, edit_profile
+│   ├── expenses.py             # Expense CRUD: add, view, edit, delete
+│   ├── budget.py               # Budget management: set_budget
+│   ├── analytics.py            # Analytics dashboard (9 sections) and PDF export
+│   └── main.py                 # PWA routes: /sw.js, /manifest.json, /offline
 ├── deploy/
-│   └── pa_deploy.sh            # PythonAnywhere safe deploy script (backup, pull, test).
+│   └── pa_deploy.sh            # PythonAnywhere deploy script (--stamp / --upgrade-to)
 ├── scripts/
-│   └── smoke_test.py           # Stdlib end-to-end smoke test (CSRF, cookies, CRUD, PDF).
+│   ├── smoke_test.py           # Stdlib end-to-end smoke test (CSRF, cookies, CRUD, PDF)
+│   └── verify_migration.py     # Pre/post migration audit & paise-conservation tool
 ├── tests/
-│   ├── conftest.py             # Shared pytest fixtures (isolated in-memory SQLite per test).
-│   ├── test_app.py             # 26 functional tests: CRUD, budget logic, validation, CSRF.
-│   └── test_regressions.py     # 66 regression tests: config, security, validation, escaping, SW.
+│   ├── conftest.py             # Shared pytest fixtures (SQLite or EXPENSEFLOW_TEST_DATABASE_URI)
+│   ├── test_app.py             # 27 functional tests: CRUD, budget logic, Decimal, CSRF
+│   ├── test_migrations.py      # 36 Alembic migration, compatibility & EXPLAIN plan tests
+│   ├── test_migration_verification.py # 4 audit & paise-conservation tests
+│   └── test_regressions.py     # 99 regression tests: config, security, constraints, case auth, SW
 ├── static/
 │   ├── main.css                # The core CSS Design System (CSS Variables, Dark/Light modes).
 │   ├── avatars.css             # Avatar styling for profile selection.
@@ -69,20 +79,21 @@ expense-flow/
 
 ## 3. Database Schema & Indexing
 
-The application relies on three distinct relational tables mapped by SQLAlchemy, heavily optimized for read-heavy financial filtering.
+The application relies on three relational tables mapped by SQLAlchemy (`models.py`) and managed via Alembic (`alembic/`), with deterministic constraint naming (`NAMING_CONVENTION`):
 
-1.  **User (`id`, `username`, `email`, `password_hash`, `recurring_budget`, `registration_date`, `avatar`, `display_name`)**
-    *   The parent table utilizing Werkzeug `pbkdf2:sha256` password hashing.
-2.  **Expense (`id`, `user_id`, `date`, `category`, `amount`, `description`, `payment_method`, `created_at`)**
-    *   Linked to `User` via foreign key `user_id`.
-    *   **Optimization:** Utilizes a **composite index** on `(user_id, date)` ensuring that complex month-over-month queries execute in $O(\log n)$ time.
-    *   Categories and payment methods are validated server-side against strict whitelists.
-3.  **Budget (`id`, `user_id`, `year_month`, `amount`)**
-    *   Linked to `User` via foreign key `user_id` with a unique constraint on `(user_id, year_month)`.
-    *   If a specific month's budget is not set, the backend dynamically falls back to the user's `recurring_budget` or standard default.
+1.  **User (`id`, `username`, `email`, `password_hash`, `recurring_budget_paise`, `registration_date`, `avatar`, `display_name`)**
+    *   Utilizes Werkzeug `pbkdf2:sha256` password hashing and `BigInteger` paise storage (`recurring_budget_paise`, `CHECK (recurring_budget_paise > 0)`).
+    *   `registration_date` and `avatar` are `NOT NULL`; functional unique indexes `ix_user_username_lower` and `ix_user_email_lower` enforce case-insensitive uniqueness alongside `func.lower()` queries in `auth.py`.
+2.  **Expense (`id`, `user_id`, `date`, `category`, `amount_paise`, `description`, `payment_method`, `created_at`)**
+    *   Linked to `User` via `user_id` (`ON DELETE CASCADE`); `date` is stored as SQL `DATE`, `amount_paise` is `BigInteger` with `CHECK (amount_paise > 0)`, and `payment_method`/`created_at` are `NOT NULL`.
+    *   **Optimization:** Utilizes the composite ordering index `idx_expense_user_date_id` on `(user_id, date, id)` with half-open `[start, next_month_start)` date range filters for sort-free `ORDER BY date DESC, id DESC` index scans.
+    *   Categories and payment methods are validated server-side against strict whitelists; monetary inputs are parsed via `Decimal` (`ROUND_HALF_UP`).
+3.  **Budget (`id`, `user_id`, `year_month`, `amount_paise`)**
+    *   Linked to `User` via `user_id` (`ON DELETE CASCADE`) with a unique constraint on `(user_id, year_month)` and `CHECK (amount_paise > 0)`.
+    *   If a specific month's budget is not set, the backend dynamically falls back to `User.recurring_budget_paise` or `DEFAULT_BUDGET_PAISE` (`200000` paise / ₹2,000.00).
 
-> [!WARNING]
-> **Cascade Deletes** are enforced at the ORM level. Deleting a User will automatically trigger the deletion of all their associated Expenses and Budgets to maintain referential integrity.
+> [!NOTE]
+> **Foreign Keys & Rollback Hygiene:** `create_app()` attaches a `PRAGMA foreign_keys=ON` connect hook to SQLite app engines so `ON DELETE CASCADE` and FK checks are enforced at runtime alongside PostgreSQL, and write routes commit through `commit_session()` to guarantee clean session rollback on `SQLAlchemyError`.
 
 ---
 
@@ -125,14 +136,15 @@ All POST forms include a hidden `csrf_token()` field validated by **Flask-WTF's 
 *   **Testing:** CSRF is disabled in the test configuration (`WTF_CSRF_ENABLED=False`) so functional tests can POST without tokens. Two dedicated tests re-enable CSRF to verify rejection without a valid token.
 
 ### H. Automated Testing & CI
-The `tests/` directory contains **92 pytest tests** across `test_app.py` and `test_regressions.py` covering:
-*   **Expense CRUD** — add, edit, delete with server-side validation (negative amounts, future dates, invalid categories)
+The `tests/` directory contains **166 pytest tests** across `test_app.py`, `test_regressions.py`, `test_migrations.py`, and `test_migration_verification.py` covering:
+*   **Expense CRUD & Precision** — add, edit, delete with `Decimal` (`ROUND_HALF_UP`) paise parsing, server-side validation, and integer paise arithmetic
 *   **Cross-user isolation** — one user cannot edit/delete another user's expenses (returns 404)
 *   **Budget logic** — default budget, explicit budget row, recurring fallback, override priority, and strict ASCII input validation
+*   **Database Integrity & Migrations** — `0001_baseline` → `0006_constraints_case_indexes` upgrade/downgrade parity, legacy Stage-1A `sqlite_autoindex_*` compatibility, `EXPLAIN` plan checks, paise-conservation audits (`verify_migration.py`), `CHECK`/`NOT NULL`/`ON DELETE CASCADE`, SQLite `PRAGMA foreign_keys=ON`, `commit_session()` rollback hygiene, and case-insensitive auth
 *   **Security & regressions** — fail-fast production `EXPENSEFLOW_SECRET_KEY` (32+ chars), HTTPS `Set-Cookie` flags (`HttpOnly`, `Secure`, `SameSite=Lax`), generic login errors, PII-free auth logs, `/edit_profile` password gate for email changes, ReportLab XML escaping, dashboard recent-transactions ordering, and `sw.js` fetch resilience
 *   **CSRF enforcement** — POST without token returns 400
 
-Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:`) created via `create_app('testing')` — the production `expenses.db` is never touched. **GitHub Actions CI** (`.github/workflows/ci.yml`) runs `pytest tests/ -v` across Python 3.10, 3.11, 3.12, and 3.13 on every push and pull request to `main`.
+Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:`) by default or against PostgreSQL via `EXPENSEFLOW_TEST_DATABASE_URI`. **GitHub Actions CI** (`.github/workflows/ci.yml`) runs `pytest tests/ -v` across Python 3.10–3.13 (SQLite) and a PostgreSQL 16 service container on every push and pull request to `main`.
 
 ---
 
@@ -153,8 +165,9 @@ Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:
 ### Local Development Setup
 1. Clone the repository: `git clone https://github.com/M3hul-raj/expense-flow.git`
 2. Create and activate a virtual environment: `python -m venv venv`
-3. Install dependencies: `pip install -r requirements.txt`
-4. Run the Flask development server: `python app.py` (defaults to `development` mode on `http://127.0.0.1:5000/`)
+3. Install dependencies: `pip install -r requirements.lock` (plus `requirements-postgres.lock` if targeting PostgreSQL)
+4. Apply schema migrations: `alembic upgrade head`
+5. Run the Flask development server: `python app.py` (defaults to `development` mode on `http://127.0.0.1:5000/`), or launch the Docker Compose stack (`docker compose up --build -d`) with `.env` copied from `.env.example`.
 
 ### Production Deployment (PythonAnywhere)
 
@@ -177,15 +190,16 @@ Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:
    ```
 
 #### Repeatable Deploy & Smoke Test Flow
-1. **Run the deploy script** in the PythonAnywhere Bash console (optionally preview first with `--dry-run`):
+1. **Audit** the existing database pre-flight (`python scripts/verify_migration.py sqlite:///$PWD/instance/expenses.db --strict --check-not-null`).
+2. **Run the deploy script** in the PythonAnywhere Bash console with an explicit revision (preview first with `--dry-run`):
    ```bash
    cd ~/ExpenseFlow
-   bash deploy/pa_deploy.sh --dry-run
-   bash deploy/pa_deploy.sh
+   bash deploy/pa_deploy.sh --upgrade-to 0006_constraints_case_indexes --dry-run
+   bash deploy/pa_deploy.sh --upgrade-to 0006_constraints_case_indexes
    ```
-   The script enforces branch `main`, backs up `instance/expenses.db` into `~/backups/` via `sqlite3 .backup`, verifies `PRAGMA integrity_check` and row counts, runs `git pull --ff-only origin main`, installs requirements, runs `pytest`, and prints the rollback command (`git reset --hard <old_hash>`). It never touches the WSGI file.
-2. **Reload**: Click **Reload** on the PythonAnywhere **Web** tab.
-3. **Run the end-to-end smoke test** against the live HTTPS URL using a dedicated test/throwaway account via environment variables:
+   *(Use `--stamp 0001_baseline` only for initial baseline tracking on an un-versioned DB.)* The script enforces branch `main`, backs up `instance/expenses.db` into `~/backups/` via `sqlite3 .backup`, verifies `PRAGMA integrity_check` and row counts, runs `git pull --ff-only origin main`, installs `requirements.lock`, executes the requested Alembic command, runs `pytest`, and prints the rollback command (`git reset --hard <old_hash>`). It never touches the WSGI file.
+3. **Reload**: Click **Reload** on the PythonAnywhere **Web** tab.
+4. **Run the end-to-end smoke test** against the live HTTPS URL using a dedicated test/throwaway account via environment variables:
    ```bash
    SMOKE_USER='<test-username>' SMOKE_PASS='<test-password>' \
      python scripts/smoke_test.py https://your_username.pythonanywhere.com
@@ -197,10 +211,10 @@ Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:
 
 For technical recruiters reviewing this repository, here is a summary of the engineering skills demonstrated in this codebase:
 
-*   **Full Stack Architecture:** Engineered a modular MVC backend with Flask's application factory pattern and 5 Blueprints, using SQLAlchemy ORM with composite database indexing for high-performance query times.
+*   **Full Stack Architecture:** Engineered a modular MVC backend with Flask's application factory pattern and 5 Blueprints, using SQLAlchemy ORM + Alembic migrations across SQLite and PostgreSQL 16 with `BigInteger` paise precision, `CHECK`/`NOT NULL`/`ON DELETE CASCADE` constraints, functional `lower()` unique indexes, and composite `(user_id, date, id)` ordering indexing.
 *   **Security Hardening:** Implemented CSRF token validation on all POST forms via Flask-WTF, brute-force login protection via Flask-Limiter (5 req / 15 min rate limit with custom 429 response rendering), fail-fast `EXPENSEFLOW_SECRET_KEY` checks, `HttpOnly`/`Secure`/`SameSite=Lax` cookies, and PII-free auth logging.
 *   **Advanced Data Processing:** Developed complex data aggregation algorithms to feed a real-time 9-section analytics engine, calculating dynamic budget thresholds, MoM variances, and heatmap intensities.
-*   **Testing & CI/CD:** Built a 92-test pytest suite with isolated in-memory database fixtures and a stdlib end-to-end smoke test, integrated into a GitHub Actions CI pipeline across Python 3.10–3.13.
+*   **Testing & CI/CD:** Built a 166-test pytest suite with isolated SQLite & PostgreSQL 16 fixtures, migration verification tooling, and a stdlib end-to-end smoke test, integrated into a GitHub Actions CI pipeline across Python 3.10–3.13 and PostgreSQL 16.
 *   **UI/UX Engineering:** Designed a premium, glassmorphic UI with a scalable CSS variable architecture, implementing flawless, OS-aware Dark and Light modes.
 *   **Web APIs & PWA:** Programmed a custom Service Worker with network-only HTML navigations (zero private page caching) and cache-first static asset caching for offline resilience and mobile installation.
 *   **Document Generation:** Built a custom pipeline using ReportLab to dynamically render and serve formatted, paginated PDF financial reports from memory.
