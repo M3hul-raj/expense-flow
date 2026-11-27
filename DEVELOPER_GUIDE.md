@@ -107,7 +107,7 @@ Instead of relying on utility-first frameworks (like Tailwind) which clutter HTM
 
 ### B. Algorithmic "GitHub-Style" Calendar Heatmap
 Generating the 7-column calendar heatmap is done entirely from scratch without heavy charting libraries:
-*   **Backend (`app.py`):** The python controller finds the user's maximum spending day for the selected month. It then calculates an `intensity` ratio (0.0 to 1.0) for every other day relative to that maximum.
+*   **Backend (`blueprints/analytics.py`):** The analytics controller finds the user's maximum spending day for the selected month and calculates an `intensity` ratio (`0.0` to `1.0`) for every other day relative to that maximum.
 *   **Frontend (`analytics.html`):** CSS Grid structures the days, and the Jinja2 template dynamically injects the calculated intensity into the `opacity` style attribute of each cell, creating a visually accurate, data-driven heatmap.
 
 ### C. Dynamic PDF Document Generation
