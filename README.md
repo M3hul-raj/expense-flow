@@ -78,7 +78,7 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 - **Blueprint Architecture** — Routes split into 6 blueprints (`auth`, `expenses`, `budget`, `analytics`, `imports`, `main`) for modularity
 - **Indexed Queries** — Composite `(user_id, date, id)` ordering index, half-open `DATE` range queries, and functional `lower(username)` / `lower(email)` unique indexes
 - **Server-side Validation** — `Decimal` (`ROUND_HALF_UP`) money parsing, case-insensitive auth queries, whitelist validation for categories/payment methods/avatars, password re-authentication for email changes, untrusted CSV HTML/formula-injection neutralization, and future-date blocking
-- **Automated Testing** — 189 pytest tests covering CRUD, budget logic, validation, CSRF enforcement, security regressions, Alembic migrations, database constraints, and CSV statement import
+- **Automated Testing** — 192 pytest tests covering CRUD, budget logic, validation, CSRF enforcement, security regressions, Alembic migrations, database constraints, and CSV statement import
 - **CI/CD** — GitHub Actions workflow runs `pytest tests/ -v` across Python 3.10–3.13 (SQLite) and PostgreSQL 16 on every push and PR to `main`
 - **Structured Logging** — All events logged to `expenseflow.log` with timestamps
 - **Environment Configuration** — Fail-fast `EXPENSEFLOW_SECRET_KEY` (32+ chars) in production; optional `EXPENSEFLOW_ENV` and `EXPENSEFLOW_DATABASE_URI`
@@ -123,7 +123,7 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 | **Security** | Flask-WTF (CSRF), Flask-Limiter (rate limiting) |
 | **Database** | SQLite & PostgreSQL 16 (`psycopg` v3), Alembic migrations |
 | **Authentication** | Werkzeug security (pbkdf2 password hashing) |
-| **Testing** | pytest (189 tests), GitHub Actions CI (Python 3.10–3.13 + PostgreSQL 16) |
+| **Testing** | pytest (192 tests), GitHub Actions CI (Python 3.10–3.13 + PostgreSQL 16) |
 | **Containers** | Docker Compose (`web` Flask/Gunicorn + `db` PostgreSQL 16) |
 | **Frontend** | HTML5, CSS3, JavaScript, Jinja2 templating |
 | **UI Framework** | Bootstrap 5.3, Font Awesome 6.4 |
@@ -284,7 +284,7 @@ expense-flow/
 │   ├── test_app.py             # 27 functional tests (CRUD, budget, Decimal, CSRF)
 │   ├── test_migrations.py      # 38 Alembic migration & EXPLAIN query-plan tests
 │   ├── test_migration_verification.py # 4 audit & paise-conservation tests
-│   ├── test_regressions.py     # 99 regression tests (security, constraints, case auth, SW)
+│   ├── test_regressions.py     # 102 regression tests (security, constraints, case auth, SW, UI)
 │   └── test_statement_import.py # 21 statement import, dedupe, rules, atomicity, security & smoke tests
 ├── static/
 │   ├── main.css                # Design system (fintech theme)

@@ -29,7 +29,7 @@
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Main Custom CSS -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='main.css') }}?v=2.6">
+    <link rel="stylesheet" href="{{ url_for('static', filename='main.css') }}?v=2.7">
     <link rel="stylesheet" href="{{ url_for('static', filename='avatars.css') }}">
     <style>
     .navbar-nav .nav-link.active {
@@ -47,16 +47,13 @@
         box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
     }
     .offcanvas-backdrop {
-        top: 76px !important;
+        top: 62px !important;
         z-index: 1040 !important;
     }
     </style>
     {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}">
-
-    <!-- Cursor Glow -->
-    <div class="cursor-glow" id="cursorGlow"></div>
 
     <!-- Modern Fintech Navbar -->
     <nav class="navbar navbar-expand-lg fixed-top" style="z-index: 1050;">
@@ -107,7 +104,7 @@
     </nav>
 
     <!-- Mobile Hardware-Accelerated Side-Drawer (Offset below navbar) -->
-    <div class="offcanvas offcanvas-end d-lg-none border-0" tabindex="-1" id="mobileMenu" style="top: 76px !important; height: calc(100vh - 76px) !important; width: 280px !important; border-left: 1px solid var(--border-color) !important; z-index: 1045;">
+    <div class="offcanvas offcanvas-end d-lg-none border-0" tabindex="-1" id="mobileMenu" style="top: 62px !important; height: calc(100vh - 62px) !important; width: 280px !important; border-left: 1px solid var(--border-color) !important; z-index: 1045;">
         <div class="offcanvas-body pt-4">
             <ul class="navbar-nav gap-2">
                 {% if session.get('user_id') %}
@@ -188,21 +185,6 @@
                 window.dispatchEvent(new CustomEvent('themechange', { detail: { theme: next } }));
             });
         });
-    })();
-
-    // ── Cursor Glow (smooth lerp follow) ─────────────────────────────────────
-    (function () {
-        var glow = document.getElementById('cursorGlow');
-        if (!glow || window.matchMedia('(pointer: coarse)').matches) return; // skip on touch devices
-        var mx = 0, my = 0, gx = 0, gy = 0;
-        document.addEventListener('mousemove', function (e) { mx = e.clientX; my = e.clientY; });
-        (function tick() {
-            gx += (mx - gx) * 0.08;
-            gy += (my - gy) * 0.08;
-            glow.style.left = gx + 'px';
-            glow.style.top = gy + 'px';
-            requestAnimationFrame(tick);
-        })();
     })();
     </script>
     <!-- PWA Service Worker Registration -->

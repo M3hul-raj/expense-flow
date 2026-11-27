@@ -231,17 +231,6 @@
 [data-theme="dark"] .theme-toggle .fa-moon  { opacity: 0; transform: rotate(90deg) scale(0); }
 [data-theme="dark"] .theme-toggle .fa-circle-half-stroke { opacity: 1; transform: rotate(0) scale(1); }
 
-/* ── Cursor Glow (dark mode only) ──────────────────────────────────────── */
-.cursor-glow {
-    position: fixed; top: 0; left: 0;
-    width: 400px; height: 400px;
-    border-radius: 50%; pointer-events: none; z-index: 0;
-    background: radial-gradient(circle, rgba(99, 102, 241, 0.12) 0%, transparent 70%);
-    transform: translate(-50%, -50%);
-    opacity: 0; transition: opacity 0.4s ease;
-}
-[data-theme="dark"] .cursor-glow { opacity: 1; }
-
 /* ── Card CSS Pop-up ─────────────────────────────────────────────────────────── */
 .fintech-card {
     transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -270,6 +259,15 @@ main {
 /* ==========================================================================
    Base Styles
    ========================================================================== */
+html {
+    font-size: 14px;
+}
+@media (min-width: 1500px) {
+    html {
+        font-size: 15px;
+    }
+}
+
 body {
     font-family: var(--font-family);
     background-color: var(--bg-color);
@@ -278,8 +276,8 @@ body {
         radial-gradient(circle at 100% 100%, #EDE9FE 0%, rgba(237, 233, 254, 0) 65%);
     background-attachment: fixed;
     color: var(--text-primary);
-    line-height: 1.6;
-    padding-top: 80px; /* Space for fixed navbar */
+    line-height: 1.55;
+    padding-top: 66px; /* Space for fixed navbar */
     margin: 0;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -313,7 +311,7 @@ a:hover {
     background-color: var(--surface-color) !important;
     border-bottom: 1px solid var(--border-color);
     box-shadow: var(--shadow-sm);
-    padding: 1rem 0;
+    padding: 0.65rem 0;
     backdrop-filter: blur(12px);
     transition: background-color 0.3s ease, border-color 0.3s ease;
 }
@@ -329,7 +327,7 @@ a:hover {
 
 .navbar-brand {
     font-weight: 700;
-    font-size: 1.4rem;
+    font-size: 1.25rem;
     color: var(--text-primary) !important;
     display: flex;
     align-items: center;
@@ -343,10 +341,11 @@ a:hover {
 .nav-link {
     color: var(--text-secondary) !important;
     font-weight: 500;
-    padding: 0.5rem 1rem !important;
+    font-size: 0.94rem;
+    padding: 0.42rem 0.85rem !important;
     border-radius: var(--radius-sm);
     transition: all 0.2s ease;
-    margin: 0 0.25rem;
+    margin: 0 0.15rem;
     white-space: nowrap;
 }
 
@@ -472,13 +471,17 @@ a:hover {
     border-radius: var(--radius-lg);
     border: 1px solid var(--border-color);
     box-shadow: var(--shadow-sm);
-    padding: 1.5rem;
+    padding: 1.25rem;
     transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .fintech-card:hover {
     box-shadow: var(--shadow-md);
-    transform: translateY(-4px);
+    transform: translateY(-2px);
+}
+
+.fintech-card.p-0:hover {
+    transform: none;
 }
 
 .fintech-card-header {
@@ -489,7 +492,7 @@ a:hover {
 }
 
 .fintech-card-title {
-    font-size: 1.1rem;
+    font-size: 1.05rem;
     font-weight: 600;
     margin: 0;
     display: flex;
@@ -505,24 +508,42 @@ a:hover {
     background-color: #F1F5F9;
     border: 1px solid #CBD5E1;
     border-radius: var(--radius-md);
-    padding: 0.75rem 1rem;
+    padding: 0.55rem 0.85rem;
     color: var(--text-primary);
-    font-size: 1rem;
-    transition: all 0.2s ease;
+    font-size: 0.95rem;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+.form-control.form-control-sm {
+    padding: 0.34rem 0.65rem;
+    font-size: 0.85rem;
+    border-radius: var(--radius-sm);
+}
+
+.form-select.form-select-sm {
+    padding: 0.34rem 1.85rem 0.34rem 0.65rem;
+    font-size: 0.85rem;
+    border-radius: var(--radius-sm);
+}
+
+@media (max-width: 767.98px) {
+    .form-control:not(.form-control-sm),
+    .form-select:not(.form-select-sm) {
+        font-size: 16px;
+    }
 }
 
 .form-control:focus, .form-select:focus {
     background-color: #FFFFFF;
-    border: 2px solid #4F46E5;
-    padding: calc(0.75rem - 1px) calc(1rem - 1px); /* Prevent shifting */
-    box-shadow: 0 0 0 4px var(--primary-light);
+    border-color: #4F46E5;
+    box-shadow: 0 0 0 3px var(--primary-light);
     outline: none;
 }
 
 .form-label {
     font-weight: 500;
     color: var(--text-secondary);
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.45rem;
     font-size: 0.9rem;
 }
 
@@ -565,7 +586,7 @@ a:hover {
     text-transform: uppercase;
     font-size: 0.75rem;
     letter-spacing: 0.05em;
-    padding: 1rem;
+    padding: 0.65rem 0.75rem;
     border-bottom: 1px solid var(--border-color);
     background-color: transparent;
 }
@@ -574,7 +595,7 @@ a:hover {
 }
 
 .table-fintech td {
-    padding: 1rem;
+    padding: 0.65rem 0.75rem;
     vertical-align: middle;
     border-bottom: 1px solid var(--bg-color);
     color: var(--text-primary);
