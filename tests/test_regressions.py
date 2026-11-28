@@ -634,7 +634,7 @@ async function dispatchFetch(url, { mode = 'cors', destination = '', accept = '*
 
 
 class TestUiPolishAndLayout:
-    """Tests for cursor-glow removal, compact form sizing CSS, valid offline icon, and review column sizing."""
+    """Tests for cursor-glow removal, standard 16px root scale, compact form controls, BFCache theme sync, and review table spacing."""
 
     def test_cursor_glow_removed_from_base_templates_and_css(self, client, auth_client):
         from pathlib import Path
@@ -642,7 +642,7 @@ class TestUiPolishAndLayout:
         root = Path(__file__).resolve().parent.parent
         css_text = (root / 'static' / 'main.css').read_text(encoding='utf-8')
         assert '.cursor-glow' not in css_text
-        assert 'html {\n    font-size: 14px;' in css_text
+        assert 'html {\n    font-size: 16px;' in css_text
         assert '.form-control.form-control-sm' in css_text
         assert '.form-select.form-select-sm' in css_text
 
@@ -650,12 +650,114 @@ class TestUiPolishAndLayout:
             html = auth_client.get(path).data.decode('utf-8')
             assert 'cursorGlow' not in html
             assert 'cursor-glow' not in html
+            assert 'main.css?v=2.8' in html
+
+    def test_bfcache_theme_sync_and_no_history_mutation(self, client, auth_client):
+        import json
+        from pathlib import Path
+        import re
+        import shutil
+        import subprocess
+
+        root = Path(__file__).resolve().parent.parent
+        for folder in ('templates', 'static'):
+            for file_path in (root / folder).rglob('*'):
+                if file_path.suffix in ('.html', '.js'):
+                    content = file_path.read_text(encoding='utf-8')
+                    assert 'pushState' not in content
+                    assert 'replaceState' not in content
+
+        dash_html = auth_client.get('/dashboard').data.decode('utf-8')
+        assert '__efApplyTheme' in dash_html
+        assert "addEventListener('pageshow'" in dash_html
+        assert "addEventListener('storage'" in dash_html
+
+        node = shutil.which('node')
+        if node:
+            scripts = re.findall(r'<script>([\s\S]*?)</script>', dash_html)
+            # Run head theme initializer (first inline script) + toggle/pageshow block (last base script before page scripts)
+            head_script = next(s for s in scripts if '__efApplyTheme' in s)
+            toggle_script = next(s for s in scripts if "addEventListener('pageshow'" in s)
+            harness = r"""
+const vm = require('vm');
+const listeners = {};
+const toggleBtnListeners = [];
+let attrTheme = null;
+const storage = new Map([['ef-theme', 'dark']]);
+const meta = { content: '' };
+const eventsDispatched = [];
+
+const context = {
+  document: {
+    documentElement: {
+      getAttribute(k) { return k === 'data-theme' ? attrTheme : null; },
+      setAttribute(k, v) { if (k === 'data-theme') attrTheme = v; },
+    },
+    getElementById(id) { return id === 'metaThemeColor' ? meta : null; },
+    querySelectorAll(sel) {
+      if (sel === '.ef-flash') return [];
+      if (sel === '.theme-toggle') return [{ addEventListener(t, fn) { if (t === 'click') toggleBtnListeners.push(fn); } }];
+      return [];
+    },
+  },
+  localStorage: {
+    getItem(k) { return storage.has(k) ? storage.get(k) : null; },
+    setItem(k, v) { storage.set(k, v); },
+  },
+  CustomEvent: function(type, init) { this.type = type; this.detail = init && init.detail; },
+  window: {
+    matchMedia() { return { matches: false }; },
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    dispatchEvent(ev) { eventsDispatched.push(ev); },
+  },
+};
+vm.runInNewContext(process.argv[1], context);
+const initialTheme = attrTheme;
+vm.runInNewContext(process.argv[2], context);
+
+// Toggle dark -> light cleanly without BFCache yet
+toggleBtnListeners[0]();
+const afterToggle = attrTheme;
+const afterToggleMeta = meta.content;
+
+// Simulate browser pressing Back onto a BFCache-frozen snapshot that still had data-theme="dark"
+attrTheme = 'dark';
+meta.content = '#0A0A0F';
+const prevDispatchCount = eventsDispatched.length;
+listeners.pageshow.forEach(fn => fn({ persisted: true }));
+
+console.log(JSON.stringify({
+  initialTheme,
+  afterToggle,
+  afterToggleMeta,
+  afterPageshowTheme: attrTheme,
+  afterPageshowMeta: meta.content,
+  themechangeFiredOnRestore: eventsDispatched.slice(prevDispatchCount).map(e => e.detail && e.detail.theme),
+}));
+"""
+            proc = subprocess.run(
+                [node, '-e', harness, head_script, toggle_script],
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            assert proc.returncode == 0, proc.stderr
+            res = json.loads(proc.stdout)
+            assert res['initialTheme'] == 'dark'
+            assert res['afterToggle'] == 'light'
+            assert res['afterToggleMeta'] == '#4F46E5'
+            assert res['afterPageshowTheme'] == 'light'
+            assert res['afterPageshowMeta'] == '#4F46E5'
+            assert res['themechangeFiredOnRestore'] == ['light']
 
     def test_offline_page_uses_valid_free_icon(self, client):
         resp = client.get('/offline')
         assert resp.status_code == 200
         assert b'fa-wifi-slash' not in resp.data
         assert b'fa-circle-exclamation' in resp.data
+
+        sw_text = client.get('/sw.js').data.decode('utf-8')
+        assert "expenseflow-v6" in sw_text
 
     def test_import_review_method_column_prevents_select_truncation(self, auth_client):
         import io
@@ -670,7 +772,7 @@ class TestUiPolishAndLayout:
         )
         batch_id = int(re.search(r'/imports/(\d+)', up.headers['Location']).group(1))
         html = auth_client.get(f'/imports/{batch_id}').data.decode('utf-8')
-        assert 'min-width: 152px;' in html
+        assert 'min-width: 164px;' in html
         assert 'container-xxl' in html
 
 

@@ -56,7 +56,7 @@ expense-flow/
 │   ├── test_app.py             # 27 functional tests: CRUD, budget logic, Decimal, CSRF
 │   ├── test_migrations.py      # 38 Alembic migration, compatibility & EXPLAIN plan tests
 │   ├── test_migration_verification.py # 4 audit & paise-conservation tests
-│   ├── test_regressions.py     # 102 regression tests: config, security, constraints, case auth, SW, UI
+│   ├── test_regressions.py     # 103 regression tests: config, security, constraints, case auth, SW, UI, BFCache
 │   └── test_statement_import.py # 21 statement import, dedupe, rules, atomicity, security & smoke tests
 ├── static/
 │   ├── main.css                # The core CSS Design System (CSS Variables, Dark/Light modes).
@@ -131,7 +131,7 @@ The `/export/pdf` route utilizes the **ReportLab (`Platypus` engine)** to genera
 *   It features custom table styling, pagination, and dynamic headers based on the current user's session data.
 
 ### D. Progressive Web App (PWA) Offline Resilience
-The application utilizes a custom Service Worker (`sw.js`, cache `expenseflow-v5`) to intercept network requests:
+The application utilizes a custom Service Worker (`sw.js`, cache `expenseflow-v6`) to intercept network requests:
 *   **Cache-First Strategy:** Static assets (CSS, icons, `/manifest.json`, CDN JS/fonts) and `/offline` are served from the local cache (with a valid `503` `Response` fallback if an uncached static fetch fails offline).
 *   **Network-Only Strategy for HTML & Dynamic Routes:** HTML navigations always hit the server directly and are never stored in Cache Storage (preventing cached private pages after logout), falling back to the pre-cached `/offline` page when offline, while non-navigation dynamic requests fall back to a valid `503` `Response` so no `FetchEvent` rejects unhandled.
 
@@ -152,7 +152,7 @@ All POST forms include a hidden `csrf_token()` field validated by **Flask-WTF's 
 *   **Testing:** CSRF and rate limiting are disabled in `testing` mode (`WTF_CSRF_ENABLED=False`, `RATELIMIT_ENABLED=False`), with dedicated tests re-enabling both to prove `400` and `429` enforcement.
 
 ### H. Automated Testing & CI
-The `tests/` directory contains **192 pytest tests** across `test_app.py`, `test_regressions.py`, `test_migrations.py`, `test_migration_verification.py`, and `test_statement_import.py` covering:
+The `tests/` directory contains **193 pytest tests** across `test_app.py`, `test_regressions.py`, `test_migrations.py`, `test_migration_verification.py`, and `test_statement_import.py` covering:
 *   **Expense CRUD & Precision** — add, edit, delete with `Decimal` (`ROUND_HALF_UP`) paise parsing, server-side validation, and integer paise arithmetic
 *   **Bank CSV Statement Import** — mapping configs (`split_columns` & `signed_amount` & custom mapping), synthetic Indian bank fixture, encoding/size/row caps, explicit invalid-row reporting, skipped credits, occurrence-aware idempotent deduplication, 1-to-1 manual duplicate flags, deterministic `"Always apply"` keyword rules, and single-transaction Confirm & Undo atomicity
 *   **Cross-user isolation** — one user cannot edit/delete another user's expenses or access/confirm/undo/delete another user's import batches or rules (returns 404)

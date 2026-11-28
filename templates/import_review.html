@@ -9,7 +9,7 @@
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
         <div>
             <div class="d-flex align-items-center gap-2 mb-1">
-                <h1 class="fw-bold mb-0" style="font-size: 1.45rem;">Import Batch #{{ batch.id }}</h1>
+                <h1 class="fw-bold mb-0" style="font-size: 1.55rem;">Import Batch #{{ batch.id }}</h1>
                 {% if batch.status == 'staged' %}
                 <span class="badge rounded-pill bg-warning text-dark">Staged (Not yet saved to expenses)</span>
                 {% elif batch.status == 'confirmed' %}
@@ -189,7 +189,7 @@
                                 <span class="badge rounded-pill bg-secondary mt-1">Undone</span>
                                 {% endif %}
                             </td>
-                            <td style="min-width: 230px;">
+                            <td style="min-width: 245px;">
                                 {% if batch.status == 'staged' %}
                                 <select name="category_{{ row.id }}" class="form-select form-select-sm mb-2">
                                     {% for cat in categories %}
@@ -218,7 +218,7 @@
                                 </span>
                                 {% endif %}
                             </td>
-                            <td style="min-width: 152px;">
+                            <td style="min-width: 164px;">
                                 {% if batch.status == 'staged' %}
                                 <select name="payment_method_{{ row.id }}" class="form-select form-select-sm">
                                     {% for m in payment_methods %}

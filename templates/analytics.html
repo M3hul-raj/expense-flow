@@ -8,8 +8,8 @@
         width: 48px; height: 48px; border-radius: 14px; flex-shrink: 0;
         display: flex; align-items: center; justify-content: center; font-size: 1.2rem;
     }
-    .kpi-value { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
-    .kpi-label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+    .kpi-value { font-size: 1.55rem; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
+    .kpi-label { font-size: 0.76rem; font-weight: 600; text-transform: uppercase;
                  letter-spacing: 0.06em; color: var(--text-secondary); margin-top: 3px; }
 
     /* Trend banner */
@@ -27,15 +27,15 @@
 
     /* Calendar heatmap */
     .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
-    .cal-day-header { text-align: center; font-size: 0.7rem; font-weight: 600;
+    .cal-day-header { text-align: center; font-size: 0.72rem; font-weight: 600;
                       color: var(--text-secondary); padding: 4px 0; }
     .cal-day { aspect-ratio: 1; border-radius: 6px; display: flex; flex-direction: column;
-               align-items: center; justify-content: center; font-size: 0.72rem; cursor: default;
+               align-items: center; justify-content: center; font-size: 0.75rem; cursor: default;
                position: relative; transition: transform 0.1s; background: var(--calendar-bg); }
     .cal-day:hover { transform: scale(1.1); z-index: 2; }
     .cal-day.empty { background: transparent; }
     .cal-day .cal-num { font-weight: 600; line-height: 1; }
-    .cal-day .cal-amt { font-size: 0.6rem; opacity: 0.85; }
+    .cal-day .cal-amt { font-size: 0.68rem; opacity: 0.85; }
     .cal-day.peak { box-shadow: 0 0 0 2px var(--danger); }
 </style>
 {% endblock %}
@@ -46,7 +46,7 @@
     <!-- ─── Header + Month Picker ────────────────────────────── -->
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
         <div>
-            <h1 class="fw-bold mb-1" style="font-size:1.5rem;">
+            <h1 class="fw-bold mb-1" style="font-size:1.625rem;">
                 <i class="fas fa-chart-bar text-primary me-2"></i>Spending Analytics
             </h1>
             <p class="text-secondary small mb-0">Deep insights for {{ selected_month_label }}</p>
@@ -75,7 +75,7 @@
                         {% if mom_direction != 'flat' %}{{ "%.1f"|format(mom_change_pct|abs) }}%{% else %}—{% endif %}
                     </div>
                     <div class="kpi-label">vs Last Month</div>
-                    <div class="text-secondary" style="font-size:0.72rem;">
+                    <div class="text-secondary" style="font-size:0.78rem;">
                         {% if mom_direction == 'up' %}More than {% elif mom_direction == 'down' %}Less than {% endif %}
                         {{ total_prev_month | currency(0) }}
                     </div>
@@ -91,7 +91,7 @@
                 <div>
                     <div class="kpi-value">{% if biggest_expense %}{{ biggest_expense.amount_paise | currency(0) }}{% else %}—{% endif %}</div>
                     <div class="kpi-label">Biggest Expense</div>
-                    <div class="text-secondary" style="font-size:0.72rem;">
+                    <div class="text-secondary" style="font-size:0.78rem;">
                         {% if biggest_expense %}{{ biggest_expense.category }} · {{ biggest_expense.date }}{% else %}No data{% endif %}
                     </div>
                 </div>
@@ -106,7 +106,7 @@
                 <div>
                     <div class="kpi-value">{{ avg_daily | currency(0) }}</div>
                     <div class="kpi-label">Daily Average</div>
-                    <div class="text-secondary" style="font-size:0.72rem;">{{ total_this_month | currency(0) }} total</div>
+                    <div class="text-secondary" style="font-size:0.78rem;">{{ total_this_month | currency(0) }} total</div>
                 </div>
             </div>
         </div>
@@ -119,7 +119,7 @@
                 <div>
                     <div class="kpi-value">{{ active_days }} <span class="text-secondary" style="font-size:1rem;font-weight:500;">/ {{ days_in_month }}</span></div>
                     <div class="kpi-label">Active Days</div>
-                    <div class="text-secondary" style="font-size:0.72rem;">days with expenses</div>
+                    <div class="text-secondary" style="font-size:0.78rem;">days with expenses</div>
                 </div>
             </div>
         </div>
