@@ -13,11 +13,24 @@
     <!-- Dark mode: apply BEFORE any rendering to prevent flash -->
     <script>
     (function() {
-        var saved = localStorage.getItem('ef-theme');
-        var theme = saved || (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-        document.documentElement.setAttribute('data-theme', theme);
-        var meta = document.getElementById('metaThemeColor');
-        if (meta) meta.content = theme === 'dark' ? '#0A0A0F' : '#4F46E5';
+        function resolveTheme() {
+            var saved = null;
+            try { saved = localStorage.getItem('ef-theme'); } catch (e) {}
+            if (saved === 'light' || saved === 'dark') return saved;
+            return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+        }
+        window.__efApplyTheme = function(theme, notify) {
+            var target = (theme === 'light' || theme === 'dark') ? theme : resolveTheme();
+            var prev = document.documentElement.getAttribute('data-theme');
+            document.documentElement.setAttribute('data-theme', target);
+            var meta = document.getElementById('metaThemeColor');
+            if (meta) meta.content = target === 'dark' ? '#0A0A0F' : '#4F46E5';
+            if (notify && prev && prev !== target) {
+                window.dispatchEvent(new CustomEvent('themechange', { detail: { theme: target } }));
+            }
+            return target;
+        };
+        window.__efApplyTheme(resolveTheme(), false);
     })();
     </script>
     <!-- Bootstrap 5 CSS -->
@@ -29,7 +42,7 @@
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Main Custom CSS -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='main.css') }}?v=2.7">
+    <link rel="stylesheet" href="{{ url_for('static', filename='main.css') }}?v=2.8">
     <link rel="stylesheet" href="{{ url_for('static', filename='avatars.css') }}">
     <style>
     .navbar-nav .nav-link.active {
@@ -169,21 +182,32 @@
         });
     })();
 
-    // ── Dark Mode Toggle ─────────────────────────────────────────────────────
+    // ── Dark Mode Toggle & Back/Forward (BFCache) / Cross-Tab Sync ─────────
     (function () {
         var toggles = document.querySelectorAll('.theme-toggle');
         toggles.forEach(function(toggle) {
             toggle.addEventListener('click', function () {
                 var current = document.documentElement.getAttribute('data-theme');
                 var next = current === 'dark' ? 'light' : 'dark';
-                document.documentElement.setAttribute('data-theme', next);
-                localStorage.setItem('ef-theme', next);
-                // Update theme-color meta
-                var meta = document.getElementById('metaThemeColor');
-                if (meta) meta.content = next === 'dark' ? '#0A0A0F' : '#4F46E5';
-                // Dispatch event for chart updates
-                window.dispatchEvent(new CustomEvent('themechange', { detail: { theme: next } }));
+                try { localStorage.setItem('ef-theme', next); } catch (e) {}
+                window.__efApplyTheme(next, true);
             });
+        });
+
+        // Re-sync theme when restored from browser Back/Forward Cache (BFCache)
+        window.addEventListener('pageshow', function (event) {
+            var saved = null;
+            try { saved = localStorage.getItem('ef-theme'); } catch (e) {}
+            if (event.persisted || saved) {
+                window.__efApplyTheme(saved, true);
+            }
+        });
+
+        // Keep open tabs aligned if theme changes in another tab
+        window.addEventListener('storage', function (event) {
+            if (event.key === 'ef-theme') {
+                window.__efApplyTheme(event.newValue, true);
+            }
         });
     })();
     </script>
