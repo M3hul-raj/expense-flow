@@ -21,7 +21,7 @@ from utils import MAX_EXPENSE_RUPEES, VALID_CATEGORIES, VALID_METHODS
 
 MAX_IMPORT_FILE_BYTES = 2 * 1024 * 1024  # 2 MB
 MAX_IMPORT_ROWS = 2_000
-MAX_PREAMBLE_SCAN = 30
+MAX_PREAMBLE_SCAN = 50
 MANUAL_DUP_DATE_TOLERANCE_DAYS = 1
 
 _PAISE_PER_RUPEE = Decimal('100')
@@ -33,14 +33,35 @@ _ASCII_DATE_CHARS_RE = re.compile(r'^[0-9A-Za-z/\-\s.,:]+$')
 _CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
 
 _RULE_STOPWORDS = {
-    'UPI', 'DR', 'CR', 'NEFT', 'RTGS', 'IMPS', 'POS', 'ATM', 'WDL', 'ACH', 'NACH',
-    'ECS', 'P2A', 'P2M', 'TRANSFER', 'PAYMENT', 'PAY', 'TXN', 'REF', 'NO', 'INR',
-    'RS', 'TO', 'FROM', 'BY', 'FOR', 'THE', 'AND', 'BANK', 'INDIA', 'PVT', 'LTD',
-    'DEBIT', 'CREDIT', 'CARD', 'ONLINE', 'ECOM', 'PURCHASE', 'WITHDRAWAL', 'DEPOSIT',
+    'UPI', 'DR', 'CR', 'NEFT', 'RTGS', 'IMPS', 'POS', 'ATM', 'WDL', 'DEP', 'TFR', 'INB',
+    'ACH', 'NACH', 'ECS', 'P2A', 'P2M', 'TRANSFER', 'PAYMENT', 'PAY', 'TXN', 'REF', 'NO',
+    'INR', 'RS', 'TO', 'FROM', 'BY', 'AT', 'FOR', 'THE', 'AND', 'MR', 'MS', 'MRS',
+    'BANK', 'INDIA', 'PVT', 'LTD', 'DEBIT', 'CREDIT', 'CARD', 'ONLINE', 'ECOM',
+    'PURCHASE', 'WITHDRAWAL', 'DEPOSIT',
     'YESB', 'HDFC', 'SBIN', 'ICIC', 'UTIB', 'KKBK', 'BARB', 'PUNB', 'CNRB', 'IDFB',
+    'UBIN', 'CBIN', 'BKID', 'AIRP', 'UCBA', 'IOBA', 'FDRL', 'PYTM', 'MAHB', 'SIBL',
+    'INDB', 'CIUB', 'KVBL', 'TMBL', 'KARB', 'FINO', 'IPPB', 'JIOB',
 }
 _IFSC_LIKE_RE = re.compile(r'^[A-Z]{4}0[A-Z0-9]{6}$')
 _MASKED_CARD_RE = re.compile(r'^[0-9]{4}[X*]{4,}[0-9]{2,4}$')
+
+_STATEMENT_FOOTER_PREFIXES = (
+    'statement summary',
+    'account summary',
+    'summary :',
+    'summary:',
+    'end of statement',
+    'end of the statement',
+    'brought forward',
+    'opening balance',
+    'closing balance',
+    'total debits',
+    'grand total',
+    'please do not share your atm',
+    'if your account is operated by a power of attorney',
+    'this is a computer generated statement',
+    'legends used in',
+)
 
 
 class StatementParseError(ValueError):
@@ -84,6 +105,25 @@ BANK_FORMATS: dict[str, BankFormatConfig] = {
         credit_column='Deposit (INR)',
         ref_column='Chq./Ref.No.',
         preamble_rows=5,
+        strict_preamble=False,
+        default_payment_method='Net Banking',
+    ),
+    'sbi_yono': BankFormatConfig(
+        key='sbi_yono',
+        label='SBI / YONO SBI (DD-MM-YYYY · Details / Debit / Credit)',
+        description=(
+            'State Bank of India (YONO / NetBanking Excel exported via Save As → CSV UTF-8) with '
+            'metadata preamble, DD-MM-YYYY dates, Details narration, Ref No/Cheque No, '
+            'Debit/Credit columns, and Statement Summary footer.'
+        ),
+        date_column='Date',
+        date_formats=('%d-%m-%Y', '%d/%m-%Y', '%d %b %Y', '%d-%b-%Y', '%d-%m-%y', '%d/%m/%y'),
+        narration_column='Details',
+        amount_mode='split_columns',
+        debit_column='Debit',
+        credit_column='Credit',
+        ref_column='Ref No/Cheque No',
+        preamble_rows=12,
         strict_preamble=False,
         default_payment_method='Net Banking',
     ),
@@ -430,12 +470,45 @@ def infer_payment_method(narration: str, default_method: str = 'Net Banking') ->
         method = 'Debit Card'
     elif any(tok in upper for tok in ('WALLET', 'PAYTM WALLET', 'AMAZON PAY', 'PHONEPE WALLET')):
         method = 'Digital Wallet'
-    elif any(tok in upper for tok in ('NEFT', 'IMPS', 'RTGS', 'ACH', 'NACH', 'ECS')):
+    elif any(tok in upper for tok in ('NEFT', 'IMPS', 'RTGS', 'ACH', 'NACH', 'ECS', 'INB', 'BY TRANSFER', 'TO TRANSFER')):
         method = 'Net Banking'
     else:
         method = default_method
 
     return method if method in VALID_METHODS else 'Net Banking'
+
+
+def _is_repeated_header_row(row: list[str], col_expectations: list[tuple[int, str]]) -> bool:
+    """Return True when a post-header row repeats all configured statement column headers."""
+    if not col_expectations:
+        return False
+    max_idx = max(idx for idx, _ in col_expectations)
+    if len(row) <= max_idx:
+        return False
+    return all(_normalize_header_name(row[idx]) == expected for idx, expected in col_expectations)
+
+
+def _is_statement_footer_row(
+    row: list[str],
+    date_col_idx: int,
+    date_formats: tuple[str, ...],
+    today: date,
+) -> bool:
+    """Detect trailing bank summary/disclaimer blocks after transaction rows without dropping invalid rows."""
+    raw_date = row[date_col_idx] if date_col_idx < len(row) else ''
+    _, date_err = _parse_statement_date(raw_date, date_formats, today)
+    if date_err is None:
+        return False
+
+    first_cell = next(
+        (clean_untrusted_text(cell, 200) for cell in row if clean_untrusted_text(cell, 200)),
+        '',
+    )
+    if not first_cell:
+        return False
+
+    normalized = first_cell.lstrip('*- \t:').lower()
+    return normalized.startswith(_STATEMENT_FOOTER_PREFIXES)
 
 
 def suggest_rule_pattern(narration: str) -> str:
@@ -564,12 +637,22 @@ def parse_statement_csv(
     parsed_rows: list[ParsedStatementRow] = []
     occ_counter: Counter[tuple[str, int, str, str]] = Counter()
     non_blank_data_rows = 0
+    header_expectations = [
+        (col_map[_normalize_header_name(col)], _normalize_header_name(col))
+        for col in _required_columns(config)
+    ]
 
     for row_idx in range(header_idx + 1, len(raw_rows)):
         line_number = row_idx + 1
         row = raw_rows[row_idx]
         if all(not clean_untrusted_text(cell, 200) for cell in row):
             continue
+
+        if parsed_rows and _is_repeated_header_row(row, header_expectations):
+            continue
+
+        if parsed_rows and _is_statement_footer_row(row, date_col_idx, config.date_formats, ref_today):
+            break
 
         non_blank_data_rows += 1
         if non_blank_data_rows > MAX_IMPORT_ROWS:

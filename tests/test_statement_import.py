@@ -289,6 +289,86 @@ class TestMappingParserAndEncodings:
         assert undo_resp.status_code == 200
         assert Expense.query.filter_by(user_id=user.id).count() == 0
 
+    def test_sbi_yono_bom_multiline_details_repeated_header_and_footer_termination(
+        self, auth_client, user
+    ):
+        # 100% synthetic fixture modeled on SBI / YONO Excel Save-As CSV export structure
+        sbi_csv = (
+            '\ufeffUncleared Amount  :  0.00,,,,,\n'
+            'MOD Bal   :  0.00,,,,,\n'
+            'Lien  :  0.00,,,,,\n'
+            'Limit  :  0.00,,,,,\n'
+            ',,,,,\n'
+            ',Currency  :  INR,,,,\n'
+            '"\t\t\t",,,,,\n'
+            '"\t\t\t",,,,,\n'
+            ',,,,,\n'
+            'Date,Details,Ref No/Cheque No,Debit,Credit,Balance\n'
+            '01-05-2026," DEP TFR   UPI/CR/900000000001/SYNTHETIC DEPOSIT/UTIB/demo\n'
+            ' user@okaxis   000000000001 AT 00000 DEMO BRANCH",,,2500,5000\n'
+            '03-05-2026," WDL TFR   UPI/DR/900000000002/FAKE MART/YESB/fake\n'
+            ' mart@ybl   000000000002 AT 00000 DEMO BRANCH",,186.8,,4813.2\n'
+            '05-05-2026," WDL TFR   UPI/DR/900000000003/SAMPLE BISTRO/UTIB/sam\n'
+            ' ple@okaxis   000000000003 AT 00000 DEMO BRANCH",,"1,250.50",,3562.7\n'
+            'Date,Details,Ref No/Cheque No,Debit,Credit,Balance\n'
+            '10-05-2026," INTERES\n T CREDIT",,,18,3580.7\n'
+            '31-02-2026," WDL TFR   CORRUPT DATE ROW BEFORE FOOTER",,50,,3530.7\n'
+            ',,,,,\n'
+            'Statement Summary : 01-05-2026  To  31-05-2026,,,,,\n'
+            'Brought Forward (₹),Dr Count,Cr Count,Total Debits (₹),Total Credits (₹),Closing Balance (₹)\n'
+            '"2,500.00CR",2,2,"1,437.30","2,518.00",3580.70CR\n'
+            ',,,,,\n'
+            '"Please do not share your ATM, Debit/Credit Card number, PIN, OTP, Username or Password with\n'
+            'anyone via email, SMS, phone call, or any other medium.",,,,,\n'
+            '"If your account is operated by a Power of Attorney holder, please review the transactions.",,,,,\n'
+            'This is a computer generated statement and does not require a signature.,,,,,\n'
+        ).encode('utf-8')
+
+        parsed = parse_statement_csv(sbi_csv, BANK_FORMATS['sbi_yono'], today=py_date(2026, 11, 28))
+        assert parsed.detected_encoding == 'utf-8-sig'
+        assert parsed.preamble_rows_skipped == 9
+
+        # Repeated header skipped; footer lines terminated cleanly; genuine bad row before footer preserved
+        debits = [r for r in parsed.rows if r.row_status == 'ready']
+        credits = [r for r in parsed.rows if r.row_status == 'skipped_credit']
+        invalids = [r for r in parsed.rows if r.row_status == 'invalid']
+        assert len(debits) == 2
+        assert len(credits) == 2
+        assert len(invalids) == 1
+        assert '31-02-2026' in invalids[0].error_reason
+
+        assert debits[0].txn_date == py_date(2026, 5, 3)
+        assert debits[0].amount_paise == 18_680
+        assert debits[0].payment_method == 'UPI'
+        assert debits[1].amount_paise == 125_050
+
+        # Upload through Flask route, verify UI review & rule suggestion omits TFR prefix
+        assert suggest_rule_pattern(debits[0].raw_narration) == 'FAKE'
+        assert suggest_rule_pattern(debits[1].raw_narration) == 'SAMPLE'
+
+        resp = _upload_csv(auth_client, sbi_csv, filename='synthetic_sbi.csv', bank_profile='sbi_yono')
+        assert resp.status_code == 302
+        batch_id = _extract_batch_id(resp)
+
+        review_html = auth_client.get(f'/imports/{batch_id}').data.decode('utf-8')
+        assert 'toggleAllImportRows' in review_html
+        assert 'Invalid Rows (1)' in review_html
+        assert 'Statement Summary' not in review_html
+        assert 'Brought Forward' not in review_html
+        assert 'Please do not share' not in review_html
+
+        confirm_resp = auth_client.post(f'/imports/{batch_id}/confirm', follow_redirects=True)
+        assert confirm_resp.status_code == 200
+        assert Expense.query.filter_by(user_id=user.id).count() == 2
+
+    def test_sbi_stopwords_exclude_tfr_and_bank_codes_from_rule_suggestions(self):
+        assert suggest_rule_pattern(
+            'WDL TFR UPI/DR/900000000009/ACME GROCERY/YESB/acme@ybl 0000123 AT 00000 BRANCH'
+        ) == 'ACME'
+        assert suggest_rule_pattern(
+            'WDL TFR UPI/DR/900000000010/METRO TRANSIT/UBIN/metro@ubin 0000124 AT 00000 BRANCH'
+        ) == 'METRO'
+
 
 class TestDedupeAndRules:
     """Tests for idempotent dedupe, identical repeats, manual duplicate flags, and deterministic rules."""

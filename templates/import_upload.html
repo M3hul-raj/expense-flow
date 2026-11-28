@@ -77,7 +77,7 @@
                             </div>
                             <div class="col-sm-4">
                                 <label for="custom_preamble_rows" class="form-label small">Preamble Rows to Skip</label>
-                                <input type="number" class="form-control form-control-sm" id="custom_preamble_rows" name="custom_preamble_rows" value="0" min="0" max="30">
+                                <input type="number" class="form-control form-control-sm" id="custom_preamble_rows" name="custom_preamble_rows" value="0" min="0" max="50">
                             </div>
                             <div class="col-sm-6">
                                 <label for="custom_amount_mode" class="form-label small">Amount Layout</label>
@@ -118,6 +118,10 @@
                         <div class="form-text small text-secondary mt-1">
                             <i class="fas fa-shield-alt me-1 text-success"></i>
                             Parsed strictly in server memory (never stored on disk). Max {{ max_file_mb }} MB · Max {{ max_rows }} rows · Debits only (credits shown as skipped).
+                        </div>
+                        <div class="form-text small text-secondary mt-1">
+                            <i class="fas fa-circle-info me-1 text-primary"></i>
+                            Using <strong>YONO SBI / Excel</strong>? Unlock and open the statement in Excel or Sheets, choose <strong>Save As → CSV UTF-8 (*.csv)</strong>, then select <strong>SBI / YONO SBI</strong> above.
                         </div>
                     </div>
 
