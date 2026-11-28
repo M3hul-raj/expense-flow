@@ -139,7 +139,16 @@
                 <table class="table-fintech w-100">
                     <thead>
                         <tr>
-                            {% if batch.status == 'staged' %}<th>Import</th>{% endif %}
+                            {% if batch.status == 'staged' %}
+                            <th>
+                                <div class="d-flex align-items-center gap-1">
+                                    <input class="form-check-input" type="checkbox" id="toggleAllImportRows"
+                                           title="Select or deselect all debit rows"
+                                           aria-label="Select or deselect all debit rows">
+                                    <span>Import</span>
+                                </div>
+                            </th>
+                            {% endif %}
                             <th>Line</th>
                             <th>Date</th>
                             <th>Narration &amp; Description</th>
@@ -153,7 +162,7 @@
                         <tr>
                             {% if batch.status == 'staged' %}
                             <td>
-                                <input class="form-check-input" type="checkbox"
+                                <input class="form-check-input import-row-checkbox" type="checkbox"
                                        name="include_{{ row.id }}" value="1"
                                        {% if row.include_on_confirm %}checked{% endif %}
                                        aria-label="Include row {{ row.line_number }}">
@@ -362,6 +371,25 @@
                     confirmBtn.disabled = true;
                     confirmBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Importing…';
                 }
+            });
+        }
+
+        var masterToggle = document.getElementById('toggleAllImportRows');
+        var rowChecks = Array.prototype.slice.call(document.querySelectorAll('.import-row-checkbox'));
+        function syncMasterToggle() {
+            if (!masterToggle || !rowChecks.length) return;
+            var checkedCount = rowChecks.filter(function (cb) { return cb.checked; }).length;
+            masterToggle.checked = checkedCount === rowChecks.length;
+            masterToggle.indeterminate = checkedCount > 0 && checkedCount < rowChecks.length;
+        }
+        if (masterToggle && rowChecks.length) {
+            syncMasterToggle();
+            masterToggle.addEventListener('change', function () {
+                rowChecks.forEach(function (cb) { cb.checked = masterToggle.checked; });
+                syncMasterToggle();
+            });
+            rowChecks.forEach(function (cb) {
+                cb.addEventListener('change', syncMasterToggle);
             });
         }
     })();

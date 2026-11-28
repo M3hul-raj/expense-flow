@@ -57,7 +57,7 @@ expense-flow/
 │   ├── test_migrations.py      # 38 Alembic migration, compatibility & EXPLAIN plan tests
 │   ├── test_migration_verification.py # 4 audit & paise-conservation tests
 │   ├── test_regressions.py     # 103 regression tests: config, security, constraints, case auth, SW, UI, BFCache
-│   └── test_statement_import.py # 21 statement import, dedupe, rules, atomicity, security & smoke tests
+│   └── test_statement_import.py # 23 statement import, SBI YONO, dedupe, rules, atomicity, security & smoke tests
 ├── static/
 │   ├── main.css                # The core CSS Design System (CSS Variables, Dark/Light modes).
 │   ├── avatars.css             # Avatar styling for profile selection.
@@ -152,7 +152,7 @@ All POST forms include a hidden `csrf_token()` field validated by **Flask-WTF's 
 *   **Testing:** CSRF and rate limiting are disabled in `testing` mode (`WTF_CSRF_ENABLED=False`, `RATELIMIT_ENABLED=False`), with dedicated tests re-enabling both to prove `400` and `429` enforcement.
 
 ### H. Automated Testing & CI
-The `tests/` directory contains **193 pytest tests** across `test_app.py`, `test_regressions.py`, `test_migrations.py`, `test_migration_verification.py`, and `test_statement_import.py` covering:
+The `tests/` directory contains **195 pytest tests** across `test_app.py`, `test_regressions.py`, `test_migrations.py`, `test_migration_verification.py`, and `test_statement_import.py` covering:
 *   **Expense CRUD & Precision** — add, edit, delete with `Decimal` (`ROUND_HALF_UP`) paise parsing, server-side validation, and integer paise arithmetic
 *   **Bank CSV Statement Import** — mapping configs (`split_columns` & `signed_amount` & custom mapping), synthetic Indian bank fixture, encoding/size/row caps, explicit invalid-row reporting, skipped credits, occurrence-aware idempotent deduplication, 1-to-1 manual duplicate flags, deterministic `"Always apply"` keyword rules, and single-transaction Confirm & Undo atomicity
 *   **Cross-user isolation** — one user cannot edit/delete another user's expenses or access/confirm/undo/delete another user's import batches or rules (returns 404)
