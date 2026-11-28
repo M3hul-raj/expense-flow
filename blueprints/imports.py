@@ -1,8 +1,9 @@
 """
-blueprints/imports.py — bank CSV statement upload, staging review, rules, confirm, and undo.
+blueprints/imports.py — multi-format bank statement upload, staging review, rules, confirm, undo, and data retention.
 
 Routes:
   GET/POST /imports
+  POST     /imports/purge-all
   GET      /imports/<batch_id>
   POST     /imports/<batch_id>/apply-rules
   POST     /imports/<batch_id>/confirm
@@ -18,6 +19,8 @@ from flask import (
     Blueprint, flash, make_response, redirect, render_template,
     request, session, url_for,
 )
+from flask_limiter.util import get_remote_address
+import sqlalchemy as sa
 from sqlalchemy.exc import SQLAlchemyError
 
 from extensions import limiter
@@ -28,13 +31,16 @@ from statement_import import (
     MANUAL_DUP_DATE_TOLERANCE_DAYS,
     MAX_IMPORT_FILE_BYTES,
     MAX_IMPORT_ROWS,
+    MAX_PDF_PAGES,
+    STAGED_BATCH_TTL_HOURS,
     SUPPORTED_CUSTOM_DATE_FORMATS,
     StatementParseError,
     build_custom_bank_config,
     categorise_narration,
     clean_untrusted_text,
     match_manual_duplicate,
-    parse_statement_file,
+    parse_statement_file_isolated,
+    purge_expired_staged_batches,
     sanitize_filename,
     suggest_rule_pattern,
 )
@@ -130,9 +136,19 @@ def _render_upload_page(user_id: int, status_code: int = 200):
             rules=rules,
             max_file_mb=MAX_IMPORT_FILE_BYTES // (1024 * 1024),
             max_rows=MAX_IMPORT_ROWS,
+            max_pages=MAX_PDF_PAGES,
+            ttl_hours=STAGED_BATCH_TTL_HOURS,
         ),
         status_code,
     )
+
+
+def _import_rate_limit_key() -> str:
+    """Rate-limit statement uploads per authenticated user ID when available, else client IP."""
+    uid = session.get('user_id')
+    if uid is not None:
+        return f'import-user:{uid}'
+    return f'import-ip:{get_remote_address()}'
 
 
 def _upload_rate_limit_exceeded(_limit):
@@ -175,6 +191,7 @@ def _resolve_bank_config(form):
 @limiter.limit(
     '10 per 15 minutes',
     methods=['POST'],
+    key_func=_import_rate_limit_key,
     error_message='Too many statement uploads.',
     on_breach=_upload_rate_limit_exceeded,
 )
@@ -187,6 +204,16 @@ def index():
     user_id = session['user_id']
 
     if request.method == 'POST':
+        purged_batches, purged_rows = purge_expired_staged_batches(db.session)
+        if purged_batches:
+            if commit_session() is not None:
+                logger.exception('Database error purging expired staged batches')
+            else:
+                logger.info(
+                    'Purged expired staged batches on upload: batches=%d rows=%d',
+                    purged_batches, purged_rows,
+                )
+
         try:
             config = _resolve_bank_config(request.form)
         except StatementParseError as exc:
@@ -209,7 +236,7 @@ def index():
         raw_pw = request.form.get('statement_password', '')
         file_password = raw_pw[:256] if raw_pw else None
         try:
-            parsed = parse_statement_file(
+            parsed = parse_statement_file_isolated(
                 raw_bytes,
                 filename=clean_name,
                 config=config,
@@ -217,6 +244,10 @@ def index():
             )
         except StatementParseError as exc:
             flash(str(exc), 'error')
+            return redirect(url_for('imports.index'))
+        except Exception:
+            logger.warning('Unexpected statement parser error: user=%s', user_id)
+            flash('Unable to parse the uploaded statement file safely.', 'error')
             return redirect(url_for('imports.index'))
 
         debit_fps = [r.fingerprint for r in parsed.rows if r.row_status == 'ready' and r.fingerprint]
@@ -719,4 +750,45 @@ def delete_rule(rule_id):
         return redirect(url_for('imports.index'))
 
     flash('Categorisation rule deleted.', 'info')
+    return redirect(url_for('imports.index'))
+
+
+@imports_bp.route('/imports/purge-all', methods=['POST'])
+def purge_all_imported_data():
+    """Atomically delete all imported expenses, staged/confirmed batches, and rules for the logged-in user."""
+    if not is_logged_in():
+        flash('Please log in to manage imported data.', 'error')
+        return redirect(url_for('auth.login'))
+
+    user_id = session['user_id']
+    deleted_rows = db.session.execute(
+        sa.delete(ImportRow).where(ImportRow.user_id == user_id)
+    ).rowcount or 0
+    deleted_expenses = db.session.execute(
+        sa.delete(Expense).where(
+            Expense.user_id == user_id,
+            sa.or_(Expense.import_batch_id.isnot(None), Expense.import_fingerprint.isnot(None)),
+        )
+    ).rowcount or 0
+    deleted_batches = db.session.execute(
+        sa.delete(ImportBatch).where(ImportBatch.user_id == user_id)
+    ).rowcount or 0
+    deleted_rules = db.session.execute(
+        sa.delete(CategoryRule).where(CategoryRule.user_id == user_id)
+    ).rowcount or 0
+
+    if commit_session() is not None:
+        logger.exception('Database error deleting imported data: user=%s', user_id)
+        flash('Unable to delete your imported data right now. Please try again.', 'error')
+        return redirect(url_for('imports.index'))
+
+    logger.info(
+        'Deleted all imported data: user=%s expenses=%d batches=%d rows=%d rules=%d',
+        user_id, deleted_expenses, deleted_batches, deleted_rows, deleted_rules,
+    )
+    flash(
+        f'Deleted all imported data ({deleted_expenses} imported expense(s), '
+        f'{deleted_batches} batch(es), and {deleted_rules} rule(s)). Manual expenses were kept untouched.',
+        'info',
+    )
     return redirect(url_for('imports.index'))

@@ -30,7 +30,7 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 
 ### Core — Expense Management
 - **Add Expenses** — Quick-add shortcuts, category/payment method selection, date picker with future-date prevention
-- **Multi-Format Bank Statement Import** — In-memory parsing of `.csv`, `.xlsx`, `.xls`, and digital `.pdf` statements (`2 MB` / `2,000` row caps, optional password unlock strictly in server RAM via `msoffcrypto-tool` / `pdfplumber` + `openpyxl` / `xlrd`), `Auto-Detect` header-synonym mapping & presets (`SBI / YONO SBI`, `Union Bank / Union Ease`, `Indian Bank Standard`, `Signed Amount`, `Custom`), running-balance reconciliation (`Prev Balance + Credit - Debit == Balance`), idempotent SHA-256 deduplication preserving identical same-day repeats, manual-expense duplicate flags, deterministic `"Always apply"` keyword rules (`else Uncategorised`), and atomic single-transaction Confirm & Undo
+- **Multi-Format Bank Statement Import** — Hardened in-memory parsing of `.csv`, `.xlsx`, `.xls`, and digital `.pdf` statements inside an isolated timeout-bounded worker (`2 MB` / `2,000` row / `25` PDF page caps, `10 MB` `.xlsx` zip-bomb decompression cap, `defusedxml` safe XML parsing, per-page PDF complexity guards, optional password unlock strictly in server RAM via `msoffcrypto-tool` / `pdfplumber` + `openpyxl` / `xlrd`), `Auto-Detect` for tested **SBI / YONO SBI** (`.xlsx`, `.csv`) and **Union Bank / Union Ease** (digital `.pdf`) formats plus **Indian Bank Standard**, **Signed Amount**, and **Custom Column Mapping**, running-balance reconciliation (`Prev Balance + Credit - Debit == Balance`), idempotent SHA-256 deduplication preserving identical same-day repeats, manual-expense duplicate flags, deterministic `"Always apply"` keyword rules (`else Uncategorised`), `24h` staged-batch TTL retention (lazy cleanup on upload + `scripts/cleanup_staged_imports.py`), and atomic Confirm, Undo & `"Delete All My Imported Data"` controls
 - **Edit & Delete** — Full CRUD with server-side validation on every field
 - **View All Transactions** — Searchable, filterable, sortable table with pagination
 - **Multi-filter System** — Filter by category, month, payment method, date range, and amount range simultaneously
@@ -72,13 +72,13 @@ Built as a full-stack Flask application with SQLAlchemy ORM and the **applicatio
 
 ### Security & Infrastructure
 - **CSRF Protection** — All POST forms validated via Flask-WTF CSRF tokens
-- **Rate Limiting** — Flask-Limiter enforces 5 POST attempts per 15 minutes on `/login` and 10 uploads per 15 minutes on `/imports` POST
+- **Rate Limiting** — Flask-Limiter enforces 5 POST attempts per 15 minutes on `/login` and 10 uploads per 15 minutes per authenticated user on `/imports` POST
 - **SQLAlchemy ORM & Migrations** — SQLite and PostgreSQL 16 parity via Alembic (`0001`–`0008`), `BigInteger` paise money columns, `CHECK`/`NOT NULL` constraints, `ON DELETE CASCADE` foreign keys, and statement-import staging/balance/rule tables
 - **Application Factory** — `create_app()` pattern supporting `production`, `development`, and `testing` configurations (with per-connection SQLite `PRAGMA foreign_keys=ON`)
 - **Blueprint Architecture** — Routes split into 6 blueprints (`auth`, `expenses`, `budget`, `analytics`, `imports`, `main`) for modularity
 - **Indexed Queries** — Composite `(user_id, date, id)` ordering index, half-open `DATE` range queries, and functional `lower(username)` / `lower(email)` unique indexes
-- **Server-side Validation** — `Decimal` (`ROUND_HALF_UP`) money parsing, case-insensitive auth queries, whitelist validation for categories/payment methods/avatars, password re-authentication for email changes, untrusted CSV HTML/formula-injection neutralization, and future-date blocking
-- **Automated Testing** — 200 pytest tests covering CRUD, budget logic, validation, CSRF enforcement, security regressions, Alembic migrations, database constraints, and multi-format statement import
+- **Server-side Validation** — `Decimal` (`ROUND_HALF_UP`) money parsing, case-insensitive auth queries, whitelist validation for categories/payment methods/avatars, password re-authentication for email changes, untrusted CSV HTML/formula-injection neutralization, `24h` staged-batch TTL retention, and future-date blocking
+- **Automated Testing** — 210 pytest tests covering CRUD, budget logic, validation, CSRF enforcement, security & DoS regressions, Alembic migrations, database constraints, retention cleanup, and multi-format statement import
 - **CI/CD** — GitHub Actions workflow runs `pytest tests/ -v` across Python 3.10–3.13 (SQLite) and PostgreSQL 16 on every push and PR to `main`
 - **Structured Logging** — All events logged to `expenseflow.log` with timestamps
 - **Environment Configuration** — Fail-fast `EXPENSEFLOW_SECRET_KEY` (32+ chars) in production; optional `EXPENSEFLOW_ENV` and `EXPENSEFLOW_DATABASE_URI`
@@ -221,7 +221,8 @@ python -c "import secrets; print(secrets.token_hex(32))"
    export EXPENSEFLOW_DATABASE_URI="sqlite:///$PWD/instance/expenses.db"
    alembic upgrade head
    ```
-   *(For repeat deploys on an existing DB, use `bash deploy/pa_deploy.sh --upgrade-to <REVISION>`.)*
+   *(For repeat deploys on an existing DB, use `bash deploy/pa_deploy.sh --upgrade-to <REVISION>` — add `--skip-tests` on CPU-constrained consoles after CI passes.)*
+   *(Optional PythonAnywhere Scheduled Task for 24h unconfirmed batch cleanup: `cd ~/ExpenseFlow && python scripts/cleanup_staged_imports.py`)*
 4. Generate a production secret key in Bash:
    ```bash
    python -c "import secrets; print(secrets.token_hex(32))"
@@ -271,21 +272,22 @@ expense-flow/
 │   ├── imports.py              # Statement import staging, review, rules, confirm, and undo
 │   └── main.py                 # PWA routes (service worker, manifest, offline)
 ├── deploy/
-│   └── pa_deploy.sh            # Safe PythonAnywhere deploy (--stamp / --upgrade-to)
+│   └── pa_deploy.sh            # Safe PythonAnywhere deploy (--stamp / --upgrade-to, optional --skip-tests)
 ├── docs/
 │   ├── RESUME_FACTS.md         # Verifiable claim -> command engineering reference
 │   └── learning/
 │       └── stage-1b.md         # Stage 1B engineering notes
 ├── scripts/
+│   ├── cleanup_staged_imports.py # Purges unconfirmed staged batches/rows older than 24h TTL
 │   ├── smoke_test.py           # Stdlib end-to-end HTTP smoke test (incl. import -> confirm -> undo)
 │   └── verify_migration.py     # Pre/post migration audit & paise-conservation check
 ├── tests/
 │   ├── conftest.py             # Shared pytest fixtures (SQLite or EXPENSEFLOW_TEST_DATABASE_URI)
 │   ├── test_app.py             # 27 functional tests (CRUD, budget, Decimal, CSRF)
-│   ├── test_migrations.py      # 39 Alembic migration & EXPLAIN query-plan tests
+│   ├── test_migrations.py      # 42 Alembic migration, deploy script & EXPLAIN query-plan tests
 │   ├── test_migration_verification.py # 4 audit & paise-conservation tests
 │   ├── test_regressions.py     # 103 regression tests (security, constraints, case auth, SW, UI, BFCache)
-│   └── test_statement_import.py # 27 multi-format import, encryption, auto-detect, balance check, dedupe, rules & smoke tests
+│   └── test_statement_import.py # 34 multi-format import, DoS/retention/privacy, balance check, dedupe, rules & smoke tests
 ├── static/
 │   ├── main.css                # Design system (fintech theme)
 │   ├── avatars.css             # Avatar styling

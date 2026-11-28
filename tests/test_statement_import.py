@@ -1165,3 +1165,508 @@ class TestSmokeTestEndToEnd:
             server.server_close()
             with smoke_app.app_context():
                 db.engine.dispose()
+
+
+class TestHardeningDosRetentionAndPrivacy:
+    """Tests for zip-bomb/XML/PDF/timeout DoS guards, 24h TTL cleanup, per-user limits, privacy UI, and purge-all."""
+
+    @staticmethod
+    def _make_encrypted_sample_pdf(pw: str = 'UnionSecret!99') -> bytes:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.pdfencrypt import StandardEncryption
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter, encrypt=StandardEncryption(pw, 'OwnerSecret!99'))
+        rows = [
+            ['Date', 'Transaction Id', 'Remarks', 'Debit Amount(INR)', 'Credit Amount(INR)', 'Balance(INR)'],
+            ['01-11-2026', 'T1001', 'UPIAR/900001/DR/CAFE/YESB/cafe@ybl', '50.00(Dr)', '', '950.00(Cr)'],
+        ]
+        tbl = Table(rows)
+        tbl.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 0.5, colors.black)]))
+        doc.build([tbl])
+        return buf.getvalue()
+
+    def test_defusedxml_enabled_and_xml_bomb_rejected(self, auth_client, user):
+        import zipfile
+        import openpyxl
+        from statement_import import parse_statement_file
+
+        assert openpyxl.DEFUSEDXML is True
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>')
+            zf.writestr(
+                'xl/workbook.xml',
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;">]>'
+                '<workbook>&lol2;</workbook>',
+            )
+        xml_bomb = buf.getvalue()
+
+        with pytest.raises(StatementParseError, match='unsafe XML'):
+            parse_statement_file(xml_bomb, filename='xml_bomb.xlsx')
+
+        resp = _upload_csv(auth_client, xml_bomb, filename='xml_bomb.xlsx', bank_profile='auto_detect')
+        assert resp.status_code == 302
+        assert b'unsafe XML' in auth_client.get('/imports').data
+        assert ImportBatch.query.count() == 0
+
+    def test_xlsx_zip_bomb_entry_cap_and_bounded_ole_stream(self, auth_client, user):
+        import zipfile
+        from statement_import import MAX_XLSX_ZIP_ENTRIES, _BoundedBytesIO, parse_statement_file
+
+        # 1. Tiny compressed ZIP (<50 KB) expanding beyond MAX_XLSX_DECOMPRESSED_BYTES (10 MB)
+        bomb_buf = io.BytesIO()
+        with zipfile.ZipFile(bomb_buf, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+            zf.writestr('[Content_Types].xml', '<Types/>')
+            zf.writestr('xl/sharedStrings.xml', '<sst>' + ('A' * (9 * 1024 * 1024)) + '</sst>')
+        bomb_bytes = bomb_buf.getvalue()
+        assert len(bomb_bytes) < 50_000
+
+        with pytest.raises(StatementParseError, match='safe decompression limit'):
+            parse_statement_file(bomb_bytes, filename='zip_bomb.xlsx')
+
+        resp = _upload_csv(auth_client, bomb_bytes, filename='zip_bomb.xlsx', bank_profile='auto_detect')
+        assert resp.status_code == 302
+        assert b'safe decompression limit' in auth_client.get('/imports').data
+        assert ImportBatch.query.count() == 0
+
+        # 2. Entry-count bomb (> MAX_XLSX_ZIP_ENTRIES)
+        many_buf = io.BytesIO()
+        with zipfile.ZipFile(many_buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            for i in range(MAX_XLSX_ZIP_ENTRIES + 1):
+                zf.writestr(f'xl/entry_{i}.txt', 'x')
+        with pytest.raises(StatementParseError, match='archive limit'):
+            parse_statement_file(many_buf.getvalue(), filename='many_entries.xlsx')
+
+        # 3. Bounded OLE decrypted stream aborts before buffering unbounded bytes
+        bounded = _BoundedBytesIO(1024, 'Decrypted payload too large')
+        assert bounded.write(b'x' * 512) == 512
+        with pytest.raises(StatementParseError, match='Decrypted payload too large'):
+            bounded.write(b'y' * 600)
+
+    def test_pdf_page_cap_25_and_pathological_table_rejected_and_timeout_kills_worker(self, auth_client, user):
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+        from reportlab.platypus import PageBreak, SimpleDocTemplate, Table, TableStyle
+        from statement_import import MAX_PDF_PAGES, parse_statement_file, parse_statement_file_isolated
+
+        assert MAX_PDF_PAGES == 25
+
+        # 1. 26-page PDF exceeds MAX_PDF_PAGES (25)
+        buf_26 = io.BytesIO()
+        c = canvas.Canvas(buf_26, pagesize=letter)
+        for p in range(26):
+            c.drawString(50, 750, f'Synthetic Page {p + 1}')
+            c.showPage()
+        c.save()
+        pdf_26 = buf_26.getvalue()
+
+        with pytest.raises(StatementParseError, match='maximum of 25 pages'):
+            parse_statement_file(pdf_26, filename='too_many_pages.pdf')
+
+        resp = _upload_csv(auth_client, pdf_26, filename='too_many_pages.pdf', bank_profile='auto_detect')
+        assert resp.status_code == 302
+        assert b'maximum of 25 pages' in auth_client.get('/imports').data
+        assert ImportBatch.query.count() == 0
+
+        # 2. Pathological PDF vector-grid bomb rejected quickly without hanging
+        buf_vec = io.BytesIO()
+        cv = canvas.Canvas(buf_vec, pagesize=letter)
+        cv.drawString(50, 760, 'Date   Remarks   Debit   Balance')
+        for i in range(2_700):
+            y = 100 + (i % 500)
+            cv.line(40, y, 540, y + 1)
+        cv.save()
+        with pytest.raises(StatementParseError, match='safe complexity limits'):
+            parse_statement_file_isolated(buf_vec.getvalue(), filename='pathological.pdf')
+
+        # 3. Real subprocess timeout kills child cleanly and keeps parent healthy
+        buf_dense = io.BytesIO()
+        doc = SimpleDocTemplate(buf_dense, pagesize=letter)
+        story = []
+        sample_rows = [
+            ['Date', 'Transaction Id', 'Remarks', 'Debit Amount(INR)', 'Credit Amount(INR)', 'Balance(INR)'],
+            *[
+                [f'0{(i % 9) + 1}-11-2026', f'T{i}', f'UPI/DR/MERCHANT{i}', '10.00(Dr)', '', '900.00(Cr)']
+                for i in range(15)
+            ],
+        ]
+        for p in range(15):
+            t = Table(sample_rows)
+            t.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 0.5, colors.black)]))
+            story.append(t)
+            if p < 14:
+                story.append(PageBreak())
+        doc.build(story)
+
+        with pytest.raises(StatementParseError, match='processing time limit'):
+            parse_statement_file_isolated(
+                buf_dense.getvalue(),
+                filename='dense_slow.pdf',
+                timeout_seconds=0.05,
+            )
+
+        # Parent process remains completely responsive for subsequent parses
+        ok_parsed = parse_statement_file_isolated(
+            b'Date,Description,Amount\n2026-10-01,Tea,-15.00\n',
+            filename='after_timeout.csv',
+            config=BANK_FORMATS['signed_iso'],
+        )
+        assert len(ok_parsed.rows) == 1
+
+    def test_per_user_import_rate_limiting_isolates_users_and_ignores_ip_rotation(self, tmp_path):
+        db_file = tmp_path / 'per_user_rl.db'
+        rl_app = create_app('development', database_uri=f"sqlite:///{db_file.as_posix()}")
+        rl_app.config['WTF_CSRF_ENABLED'] = False
+        try:
+            with rl_app.app_context():
+                db.create_all()
+                u1 = User(username='rl_alice', email='rl_alice@example.com')
+                u1.set_password('password123')
+                u2 = User(username='rl_bob', email='rl_bob@example.com')
+                u2.set_password('password123')
+                db.session.add_all([u1, u2])
+                db.session.commit()
+
+            limiter.reset()
+            csv_payload = b'Date,Description,Amount\n2026-10-01,Coffee,-25.00\n'
+
+            alice_client = rl_app.test_client()
+            _login(alice_client, 'rl_alice', 'password123')
+            for _ in range(10):
+                r = _upload_csv(alice_client, csv_payload, bank_profile='signed_iso')
+                assert r.status_code == 302
+
+            # 11th request from same IP hits per-user 429
+            r_blocked = _upload_csv(alice_client, csv_payload, bank_profile='signed_iso')
+            assert r_blocked.status_code == 429
+
+            # Rotating client IP does NOT bypass per-user limit
+            r_rotated_ip = alice_client.post(
+                '/imports',
+                data={
+                    'bank_profile': 'signed_iso',
+                    'statement_file': (io.BytesIO(csv_payload), 'statement.csv'),
+                },
+                content_type='multipart/form-data',
+                environ_base={'REMOTE_ADDR': '203.0.113.77'},
+            )
+            assert r_rotated_ip.status_code == 429
+
+            # Another user sharing the exact same IP is NOT throttled by Alice
+            bob_client = rl_app.test_client()
+            _login(bob_client, 'rl_bob', 'password123')
+            r_bob = _upload_csv(bob_client, csv_payload, bank_profile='signed_iso')
+            assert r_bob.status_code == 302
+        finally:
+            limiter.reset()
+            limiter.enabled = False
+            with rl_app.app_context():
+                db.engine.dispose()
+
+    def test_staged_batch_24h_ttl_lazy_purge_and_cli_script(self, auth_client, user, tmp_path):
+        from datetime import datetime, timedelta, timezone
+        import os
+        import sys
+
+        now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        old_ts = now_naive - timedelta(hours=25)
+        fresh_ts = now_naive - timedelta(hours=5)
+
+        expired_staged = ImportBatch(
+            user_id=user.id,
+            bank_profile='signed_iso',
+            detected_format_label='Signed Amount',
+            original_filename='expired_staged.csv',
+            file_sha256='e' * 64,
+            detected_encoding='utf-8',
+            status='staged',
+            total_rows=1,
+            created_at=old_ts,
+        )
+        fresh_staged = ImportBatch(
+            user_id=user.id,
+            bank_profile='signed_iso',
+            detected_format_label='Signed Amount',
+            original_filename='fresh_staged.csv',
+            file_sha256='f' * 64,
+            detected_encoding='utf-8',
+            status='staged',
+            total_rows=1,
+            created_at=fresh_ts,
+        )
+        old_confirmed = ImportBatch(
+            user_id=user.id,
+            bank_profile='signed_iso',
+            detected_format_label='Signed Amount',
+            original_filename='old_confirmed.csv',
+            file_sha256='c' * 64,
+            detected_encoding='utf-8',
+            status='confirmed',
+            total_rows=1,
+            imported_count=1,
+            created_at=old_ts,
+            confirmed_at=old_ts,
+        )
+        db.session.add_all([expired_staged, fresh_staged, old_confirmed])
+        db.session.flush()
+        db.session.add_all([
+            ImportRow(
+                batch_id=expired_staged.id, user_id=user.id, line_number=2,
+                row_status='ready', txn_date=py_date(2026, 10, 1), amount_paise=1000,
+                raw_narration='OLD STAGED', description='OLD STAGED', payment_method='UPI',
+            ),
+            ImportRow(
+                batch_id=fresh_staged.id, user_id=user.id, line_number=2,
+                row_status='ready', txn_date=py_date(2026, 10, 2), amount_paise=2000,
+                raw_narration='FRESH STAGED', description='FRESH STAGED', payment_method='UPI',
+            ),
+            ImportRow(
+                batch_id=old_confirmed.id, user_id=user.id, line_number=2,
+                row_status='imported', txn_date=py_date(2026, 10, 3), amount_paise=3000,
+                raw_narration='OLD CONFIRMED', description='OLD CONFIRMED', payment_method='UPI',
+            ),
+            Expense(
+                user_id=user.id, date=py_date(2026, 10, 3), category='Food',
+                amount_paise=3000, description='Confirmed Keeper', payment_method='UPI',
+                import_batch_id=old_confirmed.id, import_fingerprint='fp-keep-1',
+            ),
+        ])
+        db.session.commit()
+        expired_id = expired_staged.id
+        fresh_id = fresh_staged.id
+        confirmed_id = old_confirmed.id
+
+        # Upload triggers lazy purge of expired staged batch only
+        resp = _upload_csv(
+            auth_client,
+            b'Date,Description,Amount\n2026-10-05,New Coffee,-50.00\n',
+            bank_profile='signed_iso',
+        )
+        assert resp.status_code == 302
+        new_id = _extract_batch_id(resp)
+
+        assert db.session.get(ImportBatch, expired_id) is None
+        assert ImportRow.query.filter_by(batch_id=expired_id).count() == 0
+        assert db.session.get(ImportBatch, fresh_id) is not None
+        assert db.session.get(ImportBatch, confirmed_id) is not None
+        assert db.session.get(ImportBatch, new_id) is not None
+        assert Expense.query.filter_by(import_batch_id=confirmed_id).count() == 1
+
+        # Scheduled CLI script works cleanly on file SQLite without EXPENSEFLOW_SECRET_KEY
+        cli_db = tmp_path / 'cli_cleanup.db'
+        cli_app = create_app('development', database_uri=f"sqlite:///{cli_db.as_posix()}")
+        try:
+            with cli_app.app_context():
+                db.create_all()
+                cu = User(username='cliuser', email='cli@example.com')
+                cu.set_password('password123')
+                db.session.add(cu)
+                db.session.flush()
+                b_exp = ImportBatch(
+                    user_id=cu.id, bank_profile='signed_iso', detected_format_label='Signed Amount',
+                    original_filename='SECRET_CLI_EXPIRED.csv', file_sha256='1' * 64,
+                    detected_encoding='utf-8', status='staged', total_rows=1, created_at=old_ts,
+                )
+                b_keep = ImportBatch(
+                    user_id=cu.id, bank_profile='signed_iso', detected_format_label='Signed Amount',
+                    original_filename='recent.csv', file_sha256='2' * 64,
+                    detected_encoding='utf-8', status='staged', total_rows=1, created_at=fresh_ts,
+                )
+                b_conf = ImportBatch(
+                    user_id=cu.id, bank_profile='signed_iso', detected_format_label='Signed Amount',
+                    original_filename='confirmed.csv', file_sha256='3' * 64,
+                    detected_encoding='utf-8', status='confirmed', total_rows=1, created_at=old_ts, confirmed_at=old_ts,
+                )
+                db.session.add_all([b_exp, b_keep, b_conf])
+                db.session.flush()
+                db.session.add(ImportRow(
+                    batch_id=b_exp.id, user_id=cu.id, line_number=2,
+                    row_status='ready', txn_date=py_date(2026, 10, 1), amount_paise=100,
+                    raw_narration='SECRET_CLI_NARRATION', description='SECRET_CLI_NARRATION',
+                    payment_method='UPI',
+                ))
+                db.session.commit()
+                cli_exp_id = b_exp.id
+        finally:
+            with cli_app.app_context():
+                db.engine.dispose()
+
+        clean_env = {k: v for k, v in os.environ.items() if k != 'EXPENSEFLOW_SECRET_KEY'}
+        script = str(REPO_ROOT / 'scripts' / 'cleanup_staged_imports.py')
+        db_uri = f"sqlite:///{cli_db.as_posix()}"
+
+        dry = subprocess.run(
+            [sys.executable, script, '--database-uri', db_uri, '--ttl-hours', '24', '--dry-run'],
+            capture_output=True, text=True, env=clean_env, timeout=15,
+        )
+        assert dry.returncode == 0, dry.stderr
+        assert json.loads(dry.stdout) == {'dry_run': True, 'purged_batches': 1, 'purged_rows': 1, 'ttl_hours': 24}
+        assert 'SECRET_CLI' not in dry.stdout and 'SECRET_CLI' not in dry.stderr
+
+        live = subprocess.run(
+            [sys.executable, script, '--database-uri', db_uri, '--ttl-hours', '24'],
+            capture_output=True, text=True, env=clean_env, timeout=15,
+        )
+        assert live.returncode == 0, live.stderr
+        assert json.loads(live.stdout) == {'dry_run': False, 'purged_batches': 1, 'purged_rows': 1, 'ttl_hours': 24}
+        assert 'SECRET_CLI' not in live.stdout and 'SECRET_CLI' not in live.stderr
+
+        verify_app = create_app('development', database_uri=db_uri)
+        try:
+            with verify_app.app_context():
+                assert db.session.get(ImportBatch, cli_exp_id) is None
+                assert ImportRow.query.filter_by(batch_id=cli_exp_id).count() == 0
+                assert ImportBatch.query.count() == 2
+        finally:
+            with verify_app.app_context():
+                db.engine.dispose()
+
+    def test_password_never_leaks_in_logs_session_flash_or_error_pages(
+        self, auth_client, user, caplog, monkeypatch
+    ):
+        import logging
+        import blueprints.imports as imports_mod
+
+        pdf_pw = 'RightSecretPw!77'
+        wrong_pw = 'WrongSecretPw!99'
+        crash_pw = 'CrashSecretPw!55'
+        enc_pdf = self._make_encrypted_sample_pdf(pw=pdf_pw)
+
+        with caplog.at_level(logging.DEBUG):
+            # 1. Wrong password on encrypted PDF
+            r_wrong = _upload_csv(
+                auth_client, enc_pdf, filename='enc.pdf', bank_profile='auto_detect',
+                extra={'statement_password': wrong_pw},
+            )
+            assert r_wrong.status_code == 302
+            wrong_html = auth_client.get('/imports').data.decode('utf-8')
+            assert 'Incorrect password' in wrong_html
+            assert wrong_pw not in wrong_html
+
+            # 2. Valid password on encrypted PDF
+            r_ok = _upload_csv(
+                auth_client, enc_pdf, filename='enc.pdf', bank_profile='auto_detect',
+                extra={'statement_password': pdf_pw},
+            )
+            assert r_ok.status_code == 302
+            batch_id = _extract_batch_id(r_ok)
+            ok_html = auth_client.get(f'/imports/{batch_id}').data.decode('utf-8')
+            assert pdf_pw not in ok_html
+
+            # 3. Unexpected exception / traceback never echoes supplied password
+            def _boom(*_args, **_kwargs):
+                raise RuntimeError(f'simulated internal failure with {crash_pw}')
+
+            monkeypatch.setattr(imports_mod, 'parse_statement_file_isolated', _boom)
+            r_crash = _upload_csv(
+                auth_client, b'Date,Description,Amount\n2026-10-01,Test,-10.00\n',
+                filename='crash.csv', bank_profile='signed_iso',
+                extra={'statement_password': crash_pw},
+            )
+            assert r_crash.status_code == 302
+            crash_html = auth_client.get('/imports').data.decode('utf-8')
+            assert 'Unable to parse the uploaded statement file safely.' in crash_html
+            assert crash_pw not in crash_html
+
+        with auth_client.session_transaction() as sess:
+            sess_dump = repr(dict(sess))
+            for secret in (pdf_pw, wrong_pw, crash_pw):
+                assert secret not in sess_dump
+                assert secret not in caplog.text
+
+    def test_privacy_notice_tested_format_wording_and_purge_all_imported_data(
+        self, app, client, auth_client, user
+    ):
+        # 1. Privacy notice and non-"universal" tested-format wording on /imports
+        page_html = auth_client.get('/imports').data.decode('utf-8')
+        assert 'Privacy &amp; Data Retention' in page_html
+        assert '24 hours' in page_html
+        assert 'Delete All My Imported Data' in page_html
+        assert 'YONO SBI' in page_html
+        assert 'Union Ease' in page_html
+        assert 'Custom Column Mapping' in page_html
+        assert 'universal' not in page_html.lower()
+        assert 'any indian bank' not in page_html.lower()
+
+        # 2. Seed manual expense + confirmed batch + staged batch + rule for Alice, plus data for Bob
+        manual_exp = Expense(
+            user_id=user.id, date=py_date(2026, 10, 1), category='Food',
+            amount_paise=12500, description='Manual Lunch', payment_method='Cash',
+        )
+        bob = User(username='bob_purge', email='bob_purge@example.com')
+        bob.set_password('password123')
+        db.session.add_all([manual_exp, bob])
+        db.session.commit()
+
+        # Upload & confirm batch 1 for Alice with a rule
+        resp_confirm = _upload_csv(
+            auth_client,
+            b'Date,Description,Amount\n2026-10-02,Imported Taxi,-350.00\n',
+            bank_profile='signed_iso',
+        )
+        confirm_id = _extract_batch_id(resp_confirm)
+        auth_client.post(f'/imports/{confirm_id}/confirm', data={'include_row_1': '1'})
+        auth_client.post('/imports/rules', data={'pattern': 'UBER', 'category': 'Transport'})
+
+        # Upload staged batch 2 for Alice
+        _upload_csv(
+            auth_client,
+            b'Date,Description,Amount\n2026-10-03,Staged Snack,-45.00\n',
+            bank_profile='signed_iso',
+        )
+
+        # Seed Bob's imported data
+        bob_batch = ImportBatch(
+            user_id=bob.id, bank_profile='signed_iso', detected_format_label='Signed Amount',
+            original_filename='bob.csv', file_sha256='b' * 64, detected_encoding='utf-8',
+            status='confirmed', total_rows=1, imported_count=1,
+        )
+        db.session.add(bob_batch)
+        db.session.flush()
+        db.session.add_all([
+            ImportRow(
+                batch_id=bob_batch.id, user_id=bob.id, line_number=2, row_status='imported',
+                txn_date=py_date(2026, 10, 4), amount_paise=9900, raw_narration='BOB',
+                description='BOB', payment_method='UPI',
+            ),
+            Expense(
+                user_id=bob.id, date=py_date(2026, 10, 4), category='Food',
+                amount_paise=9900, description='Bob Imported', payment_method='UPI',
+                import_batch_id=bob_batch.id, import_fingerprint='bob-fp-1',
+            ),
+            CategoryRule(user_id=bob.id, pattern='SWIGGY', pattern_normalized='SWIGGY', category='Food'),
+        ])
+        db.session.commit()
+
+        # CSRF enforced on /imports/purge-all when enabled
+        app.config['WTF_CSRF_ENABLED'] = True
+        app.config['WTF_CSRF_CHECK_DEFAULT'] = True
+        try:
+            assert auth_client.post('/imports/purge-all').status_code == 400
+        finally:
+            app.config['WTF_CSRF_ENABLED'] = False
+            app.config['WTF_CSRF_CHECK_DEFAULT'] = False
+
+        # Alice purges all her imported data cleanly
+        purge_resp = auth_client.post('/imports/purge-all', follow_redirects=True)
+        assert purge_resp.status_code == 200
+        assert b'Deleted all imported data' in purge_resp.data
+
+        assert Expense.query.filter_by(user_id=user.id).count() == 1
+        assert Expense.query.filter_by(user_id=user.id).one().description == 'Manual Lunch'
+        assert ImportBatch.query.filter_by(user_id=user.id).count() == 0
+        assert ImportRow.query.filter_by(user_id=user.id).count() == 0
+        assert CategoryRule.query.filter_by(user_id=user.id).count() == 0
+
+        # Bob remains 100% isolated and untouched
+        assert Expense.query.filter_by(user_id=bob.id).count() == 1
+        assert ImportBatch.query.filter_by(user_id=bob.id).count() == 1
+        assert ImportRow.query.filter_by(batch_id=bob_batch.id).count() == 1
+        assert CategoryRule.query.filter_by(user_id=bob.id).count() == 1
+

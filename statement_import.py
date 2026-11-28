@@ -9,23 +9,44 @@ files or passwords to disk or logs. Monetary values are parsed with Decimal
 """
 from __future__ import annotations
 
+import base64
 from collections import Counter
 import csv
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import io
+import json
+import os
 import re
+import shutil
+import subprocess
+import sys
 from typing import Iterable
+import zipfile
 
 from utils import MAX_EXPENSE_RUPEES, VALID_CATEGORIES, VALID_METHODS
 
 MAX_IMPORT_FILE_BYTES = 2 * 1024 * 1024  # 2 MB
 MAX_IMPORT_ROWS = 2_000
 MAX_PREAMBLE_SCAN = 50
-MAX_PDF_PAGES = 100
+MAX_PDF_PAGES = 25
+MAX_PDF_TABLES_PER_PAGE = 25
+MAX_PDF_TABLE_ROWS_PER_PAGE = 1_000
+MAX_PDF_WORDS_PER_PAGE = 5_000
+MAX_PDF_TOTAL_WORDS = 50_000
+MAX_PDF_CHARS_PER_PAGE = 40_000
+MAX_PDF_VECTOR_OBJECTS_PER_PAGE = 2_500
+MAX_XLSX_ZIP_ENTRIES = 64
+MAX_XLSX_MEMBER_BYTES = 8 * 1024 * 1024  # 8 MB per zip entry
+MAX_XLSX_DECOMPRESSED_BYTES = 10 * 1024 * 1024  # 10 MB total across zip entries
+MAX_OLE_DECRYPTED_BYTES = 10 * 1024 * 1024  # 10 MB decrypted OLE stream cap
+MAX_EXCEL_SHEETS = 10
+MAX_EXCEL_COLS = 64
 MAX_EXCEL_SCAN_ROWS = MAX_IMPORT_ROWS + MAX_PREAMBLE_SCAN + 500
+PARSE_TIMEOUT_SECONDS = 15.0
+STAGED_BATCH_TTL_HOURS = 24
 MANUAL_DUP_DATE_TOLERANCE_DAYS = 1
 ALLOWED_IMPORT_EXTENSIONS = ('.csv', '.xlsx', '.xls', '.pdf')
 
@@ -967,6 +988,76 @@ def _score_candidate_sheet_rows(rows: list[list[str]]) -> int:
     return score
 
 
+class _BoundedBytesIO(io.BytesIO):
+    """In-memory byte buffer that rejects writes past max_bytes before exhausting RAM."""
+
+    def __init__(self, max_bytes: int, error_message: str):
+        super().__init__()
+        self._max_bytes = max_bytes
+        self._error_message = error_message
+
+    def write(self, data) -> int:
+        view = memoryview(data)
+        if self.tell() + len(view) > self._max_bytes:
+            raise StatementParseError(self._error_message)
+        return super().write(view)
+
+
+def _validate_xlsx_zip_bounds(stream: io.BytesIO) -> None:
+    """Validate .xlsx ZIP entry count, decompressed byte bounds, and defused XML safety."""
+    from defusedxml import DefusedXmlException
+    import defusedxml.ElementTree as DefusedET
+
+    stream.seek(0)
+    if not zipfile.is_zipfile(stream):
+        raise StatementParseError('Unable to read Excel (.xlsx) file. Ensure it is a valid workbook.')
+    stream.seek(0)
+
+    total_decompressed = 0
+    try:
+        with zipfile.ZipFile(stream, 'r') as zf:
+            infos = zf.infolist()
+            if len(infos) > MAX_XLSX_ZIP_ENTRIES:
+                raise StatementParseError(
+                    f'Uploaded Excel (.xlsx) workbook exceeds the {MAX_XLSX_ZIP_ENTRIES}-entry archive limit.'
+                )
+            for info in infos:
+                if info.file_size > MAX_XLSX_MEMBER_BYTES:
+                    raise StatementParseError(
+                        'Uploaded Excel (.xlsx) workbook expands beyond the safe decompression limit.'
+                    )
+                is_xml = info.filename.lower().endswith(('.xml', '.rels'))
+                xml_buf = bytearray() if is_xml else None
+                entry_bytes = 0
+                with zf.open(info, 'r') as entry_stream:
+                    while True:
+                        chunk = entry_stream.read(65_536)
+                        if not chunk:
+                            break
+                        entry_bytes += len(chunk)
+                        total_decompressed += len(chunk)
+                        if entry_bytes > MAX_XLSX_MEMBER_BYTES or total_decompressed > MAX_XLSX_DECOMPRESSED_BYTES:
+                            raise StatementParseError(
+                                'Uploaded Excel (.xlsx) file expands beyond the safe decompression limit.'
+                            )
+                        if xml_buf is not None:
+                            xml_buf.extend(chunk)
+                if xml_buf:
+                    DefusedET.fromstring(bytes(xml_buf))
+    except StatementParseError:
+        raise
+    except DefusedXmlException as exc:
+        raise StatementParseError(
+            'Uploaded Excel (.xlsx) file contains unsafe XML declarations and was rejected.'
+        ) from exc
+    except Exception as exc:
+        raise StatementParseError(
+            'Unable to read Excel (.xlsx) file. Ensure it is a valid workbook.'
+        ) from exc
+    finally:
+        stream.seek(0)
+
+
 def _extract_xlsx_rows(
     raw_bytes: bytes,
     password: str | None = None,
@@ -997,10 +1088,15 @@ def _extract_xlsx_rows(
             )
         stream.seek(0)
         office_file = msoffcrypto.OfficeFile(stream)
-        decrypted = io.BytesIO()
+        decrypted = _BoundedBytesIO(
+            MAX_OLE_DECRYPTED_BYTES,
+            'Decrypted Excel (.xlsx) workbook exceeds the safe size limit.',
+        )
         try:
             office_file.load_key(password=password)
             office_file.decrypt(decrypted)
+        except StatementParseError:
+            raise
         except Exception as exc:
             raise StatementParseError(
                 'Incorrect password for the uploaded Excel (.xlsx) statement.'
@@ -1011,15 +1107,21 @@ def _extract_xlsx_rows(
     else:
         stream.seek(0)
 
+    if not getattr(openpyxl, 'DEFUSEDXML', False):
+        raise StatementParseError('Safe XML parser (defusedxml) is required for Excel (.xlsx) imports.')
+    _validate_xlsx_zip_bounds(stream)
+
     wb = None
     try:
         wb = openpyxl.load_workbook(stream, read_only=True, data_only=True)
         best_rows: list[list[str]] = []
         best_score = -1
-        for sheet_name in wb.sheetnames[:10]:
+        for sheet_name in wb.sheetnames[:MAX_EXCEL_SHEETS]:
             ws = wb[sheet_name]
             sheet_rows: list[list[str]] = []
-            for row_idx, row_vals in enumerate(ws.iter_rows(values_only=True)):
+            for row_idx, row_vals in enumerate(
+                ws.iter_rows(max_row=MAX_EXCEL_SCAN_ROWS, max_col=MAX_EXCEL_COLS, values_only=True)
+            ):
                 if row_idx >= MAX_EXCEL_SCAN_ROWS:
                     break
                 sheet_rows.append([_format_cell_value(v) for v in row_vals])
@@ -1066,10 +1168,15 @@ def _extract_xls_rows(
                 raise StatementParseError(
                     'This Excel (.xls) statement is password-protected. Please enter its password and try again.'
                 )
-            decrypted = io.BytesIO()
+            decrypted = _BoundedBytesIO(
+                MAX_OLE_DECRYPTED_BYTES,
+                'Decrypted Excel (.xls) workbook exceeds the safe size limit.',
+            )
             try:
                 office_file.load_key(password=password)
                 office_file.decrypt(decrypted)
+            except StatementParseError:
+                raise
             except Exception as exc:
                 raise StatementParseError(
                     'Incorrect password for the uploaded Excel (.xls) statement.'
@@ -1093,12 +1200,13 @@ def _extract_xls_rows(
 
     best_rows: list[list[str]] = []
     best_score = -1
-    for sheet in wb.sheets()[:10]:
+    for sheet in wb.sheets()[:MAX_EXCEL_SHEETS]:
         sheet_rows: list[list[str]] = []
         row_cap = min(sheet.nrows, MAX_EXCEL_SCAN_ROWS)
+        col_cap = min(sheet.ncols, MAX_EXCEL_COLS)
         for r_idx in range(row_cap):
             row_out: list[str] = []
-            for c_idx in range(sheet.ncols):
+            for c_idx in range(col_cap):
                 cell = sheet.cell(r_idx, c_idx)
                 if cell.ctype == xlrd.XL_CELL_DATE:
                     dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
@@ -1139,8 +1247,18 @@ def _extract_borderless_pdf_rows(pages) -> list[list[str]]:
     column buckets cleanly, skips repeated headers/page footers, and joins wrapped narration lines.
     """
     word_lines: list[list[dict]] = []
+    total_words = 0
     for page in pages:
         words = page.extract_words(keep_blank_chars=False, use_text_flow=False) or []
+        if len(words) > MAX_PDF_WORDS_PER_PAGE:
+            raise StatementParseError(
+                'PDF page contains too many extracted text tokens to parse safely.'
+            )
+        total_words += len(words)
+        if total_words > MAX_PDF_TOTAL_WORDS:
+            raise StatementParseError(
+                'PDF contains too many extracted text tokens to parse safely.'
+            )
         page_lines: list[list[dict]] = []
         for w in sorted(words, key=lambda item: (round(float(item['top']), 1), float(item['x0']))):
             if not page_lines or abs(float(w['top']) - float(page_lines[-1][0]['top'])) > 4.0:
@@ -1285,15 +1403,42 @@ def _extract_pdf_rows(
             lattice_rows: list[list[str]] = []
 
             for page in pdf.pages:
+                chars_count = len(getattr(page, 'chars', ()) or ())
+                vector_count = (
+                    len(getattr(page, 'lines', ()) or ())
+                    + len(getattr(page, 'rects', ()) or ())
+                    + len(getattr(page, 'curves', ()) or ())
+                )
+                if chars_count > MAX_PDF_CHARS_PER_PAGE or vector_count > MAX_PDF_VECTOR_OBJECTS_PER_PAGE:
+                    raise StatementParseError(
+                        'PDF layout exceeds safe complexity limits for in-browser parsing.'
+                    )
+
                 page_txt = (page.extract_text() or '').strip()
                 if page_txt:
                     has_selectable_text = True
 
-                for tbl in page.extract_tables() or []:
+                tables = page.extract_tables() or []
+                if len(tables) > MAX_PDF_TABLES_PER_PAGE:
+                    raise StatementParseError(
+                        'PDF contains too many tables per page to parse safely.'
+                    )
+
+                page_table_rows = 0
+                for tbl in tables:
                     if not tbl or max((len(r) for r in tbl), default=0) < 3:
                         continue
+                    page_table_rows += len(tbl)
+                    if page_table_rows > MAX_PDF_TABLE_ROWS_PER_PAGE:
+                        raise StatementParseError(
+                            'PDF table contains too many rows on a single page to parse safely.'
+                        )
                     for r in tbl:
-                        lattice_rows.append([cell or '' for cell in r])
+                        if len(lattice_rows) >= MAX_EXCEL_SCAN_ROWS:
+                            break
+                        lattice_rows.append([cell or '' for cell in r[:MAX_EXCEL_COLS]])
+                    if len(lattice_rows) >= MAX_EXCEL_SCAN_ROWS:
+                        break
 
             if not has_selectable_text:
                 raise StatementParseError(
@@ -1874,3 +2019,246 @@ def match_manual_duplicate(
             best_id = exp.id
 
     return best_id
+
+
+def _serialize_bank_config(config: BankFormatConfig) -> dict:
+    data = asdict(config)
+    data['date_formats'] = list(config.date_formats)
+    return data
+
+
+def _deserialize_bank_config(data: dict) -> BankFormatConfig:
+    return BankFormatConfig(
+        key=data['key'],
+        label=data['label'],
+        description=data['description'],
+        date_column=data['date_column'],
+        date_formats=tuple(data['date_formats']),
+        narration_column=data['narration_column'],
+        amount_mode=data['amount_mode'],
+        debit_column=data.get('debit_column'),
+        credit_column=data.get('credit_column'),
+        amount_column=data.get('amount_column'),
+        type_column=data.get('type_column'),
+        signed_debit_negative=bool(data.get('signed_debit_negative', True)),
+        ref_column=data.get('ref_column'),
+        balance_column=data.get('balance_column'),
+        preamble_rows=int(data.get('preamble_rows', 0)),
+        strict_preamble=bool(data.get('strict_preamble', False)),
+        max_preamble_scan=int(data.get('max_preamble_scan', MAX_PREAMBLE_SCAN)),
+        default_payment_method=data.get('default_payment_method', 'Net Banking'),
+    )
+
+
+def _serialize_parsed_statement(parsed: ParsedStatement) -> dict:
+    rows_out = []
+    for row in parsed.rows:
+        item = asdict(row)
+        item['txn_date'] = row.txn_date.isoformat() if row.txn_date is not None else None
+        rows_out.append(item)
+    return {
+        'bank_profile': parsed.bank_profile,
+        'detected_format_label': parsed.detected_format_label,
+        'detected_encoding': parsed.detected_encoding,
+        'file_sha256': parsed.file_sha256,
+        'preamble_rows_skipped': parsed.preamble_rows_skipped,
+        'balance_check_status': parsed.balance_check_status,
+        'balance_mismatch_count': parsed.balance_mismatch_count,
+        'rows': rows_out,
+    }
+
+
+def _deserialize_parsed_statement(data: dict) -> ParsedStatement:
+    rows = [
+        ParsedStatementRow(
+            line_number=int(r['line_number']),
+            row_status=r['row_status'],
+            txn_date=date.fromisoformat(r['txn_date']) if r.get('txn_date') else None,
+            amount_paise=r.get('amount_paise'),
+            running_balance_paise=r.get('running_balance_paise'),
+            balance_mismatch_note=r.get('balance_mismatch_note'),
+            raw_narration=r['raw_narration'],
+            description=r['description'],
+            ref_no=r['ref_no'],
+            payment_method=r['payment_method'],
+            fingerprint=r.get('fingerprint'),
+            error_reason=r.get('error_reason'),
+            raw_preview=r['raw_preview'],
+        )
+        for r in data['rows']
+    ]
+    return ParsedStatement(
+        bank_profile=data['bank_profile'],
+        detected_format_label=data['detected_format_label'],
+        detected_encoding=data['detected_encoding'],
+        file_sha256=data['file_sha256'],
+        preamble_rows_skipped=int(data['preamble_rows_skipped']),
+        balance_check_status=data['balance_check_status'],
+        balance_mismatch_count=int(data['balance_mismatch_count']),
+        rows=rows,
+    )
+
+
+def _resolve_python_executable() -> str:
+    """Resolve the active virtualenv Python interpreter even inside uWSGI/Gunicorn workers."""
+    exe_name = os.path.basename(sys.executable or '').lower()
+    if exe_name.startswith('python') and os.path.isfile(sys.executable):
+        return sys.executable
+    candidate = (
+        os.path.join(sys.prefix, 'Scripts', 'python.exe')
+        if os.name == 'nt'
+        else os.path.join(sys.prefix, 'bin', 'python')
+    )
+    if os.path.isfile(candidate):
+        return candidate
+    return shutil.which('python3') or shutil.which('python') or sys.executable
+
+
+def parse_statement_file_isolated(
+    raw_bytes: bytes,
+    *,
+    filename: str,
+    config: BankFormatConfig | None = None,
+    file_password: str | None = None,
+    today: date | None = None,
+    timeout_seconds: float | None = None,
+) -> ParsedStatement:
+    """
+    Execute statement parsing in a bounded child process to isolate memory and enforce a hard wall-clock timeout.
+
+    Inputs (including optional transient password) are passed strictly over the child process's
+    stdin pipe—never via command-line arguments, environment variables, temporary files, or logs.
+    """
+    clean_name = sanitize_filename(filename)
+    ext = ('.' + clean_name.rsplit('.', 1)[-1].lower()) if '.' in clean_name else ''
+    if ext not in ALLOWED_IMPORT_EXTENSIONS:
+        raise StatementParseError(
+            'Unsupported file format. Please upload a .csv, .xlsx, .xls, or digital .pdf statement.'
+        )
+    if len(raw_bytes) > MAX_IMPORT_FILE_BYTES:
+        raise StatementParseError('Statement file exceeds the 2 MB maximum size limit.')
+
+    effective_timeout = PARSE_TIMEOUT_SECONDS if timeout_seconds is None else float(timeout_seconds)
+    payload = json.dumps({
+        'raw_b64': base64.b64encode(raw_bytes).decode('ascii'),
+        'filename': clean_name,
+        'config': _serialize_bank_config(config) if config is not None else None,
+        'file_password': file_password,
+        'today': today.isoformat() if today is not None else None,
+    })
+
+    python_exe = _resolve_python_executable()
+    script_path = os.path.abspath(__file__)
+    proc = subprocess.Popen(
+        [python_exe, script_path, '--worker'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding='utf-8',
+        cwd=os.path.dirname(script_path),
+    )
+    try:
+        stdout_data, _ = proc.communicate(input=payload, timeout=effective_timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        proc.communicate()
+        raise StatementParseError(
+            f'Statement parsing exceeded the {effective_timeout:g}s processing time limit '
+            'and was stopped cleanly.'
+        ) from exc
+
+    if proc.returncode != 0 or not stdout_data:
+        raise StatementParseError('Unable to parse the uploaded statement file safely.')
+    try:
+        data = json.loads(stdout_data)
+    except json.JSONDecodeError as exc:
+        raise StatementParseError('Unable to parse the uploaded statement file safely.') from exc
+
+    if not data.get('ok'):
+        raise StatementParseError(
+            str(data.get('error') or 'Unable to parse the uploaded statement file safely.')
+        )
+    return _deserialize_parsed_statement(data['result'])
+
+
+def purge_expired_staged_batches(
+    sa_session,
+    *,
+    ttl_hours: int = STAGED_BATCH_TTL_HOURS,
+    now_utc: datetime | None = None,
+    dry_run: bool = False,
+) -> tuple[int, int]:
+    """Delete unconfirmed staged ImportBatch and ImportRow records older than ttl_hours."""
+    from datetime import timezone as _tz
+    import sqlalchemy as sa
+    from models import ImportBatch, ImportRow
+
+    reference_now = now_utc or datetime.now(_tz.utc)
+    if reference_now.tzinfo is not None:
+        cutoff = reference_now.astimezone(_tz.utc).replace(tzinfo=None) - timedelta(hours=ttl_hours)
+    else:
+        cutoff = reference_now - timedelta(hours=ttl_hours)
+
+    expired_ids = list(
+        sa_session.scalars(
+            sa.select(ImportBatch.id).where(
+                ImportBatch.status == 'staged',
+                ImportBatch.created_at < cutoff,
+            )
+        ).all()
+    )
+    if not expired_ids:
+        return 0, 0
+
+    rows_count = int(
+        sa_session.scalar(
+            sa.select(sa.func.count(ImportRow.id)).where(ImportRow.batch_id.in_(expired_ids))
+        )
+        or 0
+    )
+    if dry_run:
+        return len(expired_ids), rows_count
+
+    for i in range(0, len(expired_ids), 500):
+        chunk = expired_ids[i:i + 500]
+        sa_session.execute(sa.delete(ImportRow).where(ImportRow.batch_id.in_(chunk)))
+        sa_session.execute(sa.delete(ImportBatch).where(ImportBatch.id.in_(chunk)))
+    return len(expired_ids), rows_count
+
+
+def _parse_worker_main() -> int:
+    """Entrypoint for isolated child-process statement parsing (`python statement_import.py --worker`)."""
+    import logging
+
+    logging.disable(logging.CRITICAL)
+    try:
+        payload = json.loads(sys.stdin.read())
+        raw_bytes = base64.b64decode(payload['raw_b64'].encode('ascii'))
+        filename = payload['filename']
+        config_data = payload.get('config')
+        config = _deserialize_bank_config(config_data) if config_data is not None else None
+        file_password = payload.get('file_password')
+        today_raw = payload.get('today')
+        today_val = date.fromisoformat(today_raw) if today_raw else None
+        parsed = parse_statement_file(
+            raw_bytes,
+            filename=filename,
+            config=config,
+            file_password=file_password,
+            today=today_val,
+        )
+        response = {'ok': True, 'result': _serialize_parsed_statement(parsed)}
+    except StatementParseError as exc:
+        response = {'ok': False, 'error': str(exc)}
+    except Exception:
+        response = {'ok': False, 'error': 'Unable to parse the uploaded statement file safely.'}
+
+    sys.stdout.write(json.dumps(response))
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == '__main__':
+    if '--worker' in sys.argv[1:]:
+        raise SystemExit(_parse_worker_main())
