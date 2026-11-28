@@ -12,7 +12,7 @@
                 <i class="fas fa-file-import text-primary me-2"></i>Import Bank Statement
             </h1>
             <p class="text-secondary mb-0 small">
-                Upload a CSV statement, review detected transactions, apply rules, and confirm in one atomic batch.
+                Upload a CSV, Excel (.xlsx/.xls), or digital PDF statement, verify running balances, apply rules, and confirm in one atomic batch.
             </p>
         </div>
         <div class="d-flex gap-2 flex-wrap">
@@ -33,7 +33,7 @@
             <div class="fintech-card h-100">
                 <div class="fintech-card-title mb-3">
                     <i class="fas fa-upload text-primary"></i>
-                    Upload CSV Statement
+                    Upload Statement (CSV, Excel, or Digital PDF)
                 </div>
                 <form method="POST" action="{{ url_for('imports.index') }}" enctype="multipart/form-data" id="importUploadForm">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -41,15 +41,20 @@
                     <div class="mb-3">
                         <label for="bank_profile" class="form-label">Bank Statement Format</label>
                         <select class="form-select" id="bank_profile" name="bank_profile" required>
+                            <option value="auto_detect"
+                                    data-desc="Automatically matches Date, Narration (Details/Remarks/Particulars), Debit/Credit or signed Amount, Reference, and Running Balance columns across most Indian banks (CSV, Excel, or digital PDF)."
+                                    selected>
+                                Auto-Detect (Any Indian Bank · CSV / Excel / Digital PDF)
+                            </option>
                             {% for fmt in bank_formats %}
                             <option value="{{ fmt.key }}" data-desc="{{ fmt.description }}">{{ fmt.label }}</option>
                             {% endfor %}
-                            <option value="custom" data-desc="Configure custom CSV column names, date format, debit/credit mode, and preamble rows to skip.">
-                                Custom CSV Column Mapping…
+                            <option value="custom" data-desc="Configure custom column names, date format, debit/credit mode, and preamble rows to skip.">
+                                Custom Column Mapping…
                             </option>
                         </select>
                         <div id="formatDescription" class="form-text small text-secondary mt-1">
-                            {{ bank_formats[0].description if bank_formats else '' }}
+                            Automatically matches Date, Narration (Details/Remarks/Particulars), Debit/Credit or signed Amount, Reference, and Running Balance columns across most Indian banks (CSV, Excel, or digital PDF).
                         </div>
                     </div>
 
@@ -113,15 +118,29 @@
                     </div>
 
                     <div class="mb-3">
-                        <label for="statement_file" class="form-label">Statement CSV File</label>
-                        <input type="file" class="form-control" id="statement_file" name="statement_file" accept=".csv,text/csv" required>
+                        <label for="statement_file" class="form-label">Statement File (.csv, .xlsx, .xls, digital .pdf)</label>
+                        <input type="file" class="form-control" id="statement_file" name="statement_file"
+                               accept=".csv,.xlsx,.xls,.pdf,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                               required>
                         <div class="form-text small text-secondary mt-1">
                             <i class="fas fa-shield-alt me-1 text-success"></i>
                             Parsed strictly in server memory (never stored on disk). Max {{ max_file_mb }} MB · Max {{ max_rows }} rows · Debits only (credits shown as skipped).
                         </div>
                         <div class="form-text small text-secondary mt-1">
                             <i class="fas fa-circle-info me-1 text-primary"></i>
-                            Using <strong>YONO SBI / Excel</strong>? Unlock and open the statement in Excel or Sheets, choose <strong>Save As → CSV UTF-8 (*.csv)</strong>, then select <strong>SBI / YONO SBI</strong> above.
+                            Supports direct uploads from <strong>YONO SBI (.xlsx/.csv)</strong> and <strong>Union Ease (.pdf)</strong>. Digital text PDFs only (scanned/image-only PDFs are not supported).
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="statement_password" class="form-label">
+                            <i class="fas fa-key me-1 text-muted"></i>File Password <span class="text-secondary small">(optional)</span>
+                        </label>
+                        <input type="password" class="form-control" id="statement_password" name="statement_password"
+                               placeholder="Enter password only if your PDF or Excel file is locked"
+                               autocomplete="off" maxlength="256">
+                        <div class="form-text small text-secondary mt-1">
+                            Used in memory during unlock only — never saved to the database or logs.
                         </div>
                     </div>
 
@@ -263,7 +282,7 @@
         </div>
         {% else %}
         <div class="text-center py-5 text-secondary small">
-            No import batches yet. Upload a CSV above to stage your first bank statement.
+            No import batches yet. Upload a CSV, Excel, or digital PDF statement above to stage your first bank statement.
         </div>
         {% endif %}
     </div>
