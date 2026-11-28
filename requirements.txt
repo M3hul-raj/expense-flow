@@ -1,5 +1,6 @@
 alembic==1.20.1
 cryptography>=44.0.0,<47.0.0
+defusedxml>=0.7.1,<1.0.0
 Flask==3.1.2
 gunicorn==21.2.0
 msoffcrypto-tool>=5.4.2,<6.0.0

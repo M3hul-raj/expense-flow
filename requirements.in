@@ -1,6 +1,7 @@
 # Direct application and test dependencies (Python >=3.10, SQLite/PythonAnywhere safe; no psycopg)
 alembic==1.20.1
 cryptography>=44.0.0,<47.0.0
+defusedxml>=0.7.1,<1.0.0
 Flask==3.1.2
 Flask-Limiter==4.1.1
 Flask-SQLAlchemy==3.1.1

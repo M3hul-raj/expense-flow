@@ -184,6 +184,8 @@ class TestDeployScriptModes:
         [
             (),
             ('--dry-run',),
+            ('--skip-tests',),
+            ('--skip-tests', '--dry-run'),
             ('--unknown',),
             ('--stamp',),
             ('--stamp', '--dry-run'),
@@ -207,6 +209,7 @@ class TestDeployScriptModes:
         assert res.returncode == 0, res.stderr
         assert 'alembic stamp "0001_baseline"' in res.stdout or 'alembic stamp 0001_baseline' in res.stdout
         assert 'requirements.lock' in res.stdout
+        assert 'python -m pytest tests/ -q' in res.stdout
         assert 'alembic upgrade' not in res.stdout
 
     def test_upgrade_to_dry_run_outputs_explicit_target_and_locked_install(self):
@@ -214,8 +217,22 @@ class TestDeployScriptModes:
         assert res.returncode == 0, res.stderr
         assert 'alembic upgrade "0002_dates"' in res.stdout or 'alembic upgrade 0002_dates' in res.stdout
         assert 'requirements.lock' in res.stdout
+        assert 'python -m pytest tests/ -q' in res.stdout
         assert 'alembic stamp' not in res.stdout
         assert 'upgrade head' not in res.stdout
+
+    def test_skip_tests_dry_run_skips_pytest_without_altering_migration_step(self):
+        res = self._run_deploy('--upgrade-to', '0008_multiformat_balance', '--skip-tests', '--dry-run')
+        assert res.returncode == 0, res.stderr
+        assert 'alembic upgrade "0008_multiformat_balance"' in res.stdout or 'alembic upgrade 0008_multiformat_balance' in res.stdout
+        assert 'skipping pytest (--skip-tests passed)' in res.stdout
+        assert 'python -m pytest' not in res.stdout
+
+        res_stamp = self._run_deploy('--stamp', '0001_baseline', '--skip-tests', '--dry-run')
+        assert res_stamp.returncode == 0, res_stamp.stderr
+        assert 'alembic stamp "0001_baseline"' in res_stamp.stdout or 'alembic stamp 0001_baseline' in res_stamp.stdout
+        assert 'skipping pytest (--skip-tests passed)' in res_stamp.stdout
+        assert 'python -m pytest' not in res_stamp.stdout
 
 
 class TestSchemaReconciliation:

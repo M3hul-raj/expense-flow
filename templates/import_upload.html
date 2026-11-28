@@ -42,9 +42,9 @@
                         <label for="bank_profile" class="form-label">Bank Statement Format</label>
                         <select class="form-select" id="bank_profile" name="bank_profile" required>
                             <option value="auto_detect"
-                                    data-desc="Automatically matches Date, Narration (Details/Remarks/Particulars), Debit/Credit or signed Amount, Reference, and Running Balance columns across most Indian banks (CSV, Excel, or digital PDF)."
+                                    data-desc="Auto-detect for tested SBI (YONO SBI .xlsx/.csv) and Union Bank (Union Ease .pdf) formats plus compatible Date, Narration, Debit/Credit or signed Amount, Reference, and Running Balance headers — or configure Custom Column Mapping."
                                     selected>
-                                Auto-Detect (Any Indian Bank · CSV / Excel / Digital PDF)
+                                Auto-Detect (Tested SBI / Union Bank · Custom Mapping Below)
                             </option>
                             {% for fmt in bank_formats %}
                             <option value="{{ fmt.key }}" data-desc="{{ fmt.description }}">{{ fmt.label }}</option>
@@ -54,7 +54,7 @@
                             </option>
                         </select>
                         <div id="formatDescription" class="form-text small text-secondary mt-1">
-                            Automatically matches Date, Narration (Details/Remarks/Particulars), Debit/Credit or signed Amount, Reference, and Running Balance columns across most Indian banks (CSV, Excel, or digital PDF).
+                            Auto-detect for tested SBI (YONO SBI .xlsx/.csv) and Union Bank (Union Ease .pdf) formats plus compatible Date, Narration, Debit/Credit or signed Amount, Reference, and Running Balance headers — or configure Custom Column Mapping.
                         </div>
                     </div>
 
@@ -124,11 +124,11 @@
                                required>
                         <div class="form-text small text-secondary mt-1">
                             <i class="fas fa-shield-alt me-1 text-success"></i>
-                            Parsed strictly in server memory (never stored on disk). Max {{ max_file_mb }} MB · Max {{ max_rows }} rows · Debits only (credits shown as skipped).
+                            Parsed strictly in server memory inside an isolated worker (never stored on disk). Max {{ max_file_mb }} MB · Max {{ max_rows }} rows · Max {{ max_pages }} PDF pages · Debits only (credits shown as skipped).
                         </div>
                         <div class="form-text small text-secondary mt-1">
                             <i class="fas fa-circle-info me-1 text-primary"></i>
-                            Supports direct uploads from <strong>YONO SBI (.xlsx/.csv)</strong> and <strong>Union Ease (.pdf)</strong>. Digital text PDFs only (scanned/image-only PDFs are not supported).
+                            <strong>Tested formats:</strong> <strong>SBI / YONO SBI</strong> (<code>.xlsx</code>, <code>.csv</code>), <strong>Union Bank / Union Ease</strong> (digital <code>.pdf</code>), <strong>Indian Bank Standard</strong> (<code>.csv</code>/<code>.xls</code>), and <strong>Signed Amount</strong> (<code>.csv</code>), plus Custom Column Mapping. Digital text PDFs only (scanned/image-only PDFs are not supported).
                         </div>
                     </div>
 
@@ -285,6 +285,30 @@
             No import batches yet. Upload a CSV, Excel, or digital PDF statement above to stage your first bank statement.
         </div>
         {% endif %}
+    </div>
+
+    <!-- ─── Privacy & Data Retention ─── -->
+    <div class="fintech-card mt-4" id="importPrivacyPanel">
+        <div class="d-flex align-items-start justify-content-between flex-wrap gap-3">
+            <div style="max-width: 760px;">
+                <div class="fintech-card-title mb-2">
+                    <i class="fas fa-user-shield text-success"></i>
+                    Privacy &amp; Data Retention
+                </div>
+                <ul class="small text-secondary mb-2 ps-3">
+                    <li><strong>What is stored:</strong> Confirmed expenses added to your ledger, unconfirmed staged batches/rows for review (auto-purged after <strong>{{ ttl_hours }} hours</strong>), and your saved categorisation rules.</li>
+                    <li><strong>What is never stored:</strong> Your uploaded statement file bytes and optional unlock passwords — both stay strictly in server RAM inside an isolated time-limited parser process and are never written to disk, sessions, or application logs.</li>
+                    <li><strong>How to remove it:</strong> Discard a staged batch before confirming, click <strong>Undo</strong> on any confirmed batch, or erase every imported expense, batch, and rule at once using the button on the right (manually added expenses stay untouched).</li>
+                </ul>
+            </div>
+            <form method="POST" action="{{ url_for('imports.purge_all_imported_data') }}"
+                  onsubmit="return confirm('Delete ALL imported expenses, import batches, and saved categorisation rules? Manually entered expenses will not be touched.');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-outline-danger btn-sm rounded-pill" id="purgeAllImportedBtn">
+                    <i class="fas fa-trash-can me-1"></i>Delete All My Imported Data
+                </button>
+            </form>
+        </div>
     </div>
 
 </div>

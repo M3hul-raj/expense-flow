@@ -19,6 +19,8 @@ cryptography==46.0.7
     #   -r requirements.in
     #   msoffcrypto-tool
     #   pdfminer-six
+defusedxml==0.7.1
+    # via -r requirements.in
 deprecated==1.3.1 ; python_full_version < '3.12'
     # via limits
 deprecated==3.0.1 ; python_full_version >= '3.12'

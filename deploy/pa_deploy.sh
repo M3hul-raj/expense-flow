@@ -3,11 +3,12 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 (--stamp REVISION | --upgrade-to REVISION) [--dry-run]
+Usage: $0 (--stamp REVISION | --upgrade-to REVISION) [--skip-tests] [--dry-run]
 EOF
 }
 
 DRY_RUN=false
+SKIP_TESTS=false
 MODE=""
 TARGET_REVISION=""
 
@@ -47,6 +48,10 @@ while [ "$#" -gt 0 ]; do
       DRY_RUN=true
       shift
       ;;
+    --skip-tests)
+      SKIP_TESTS=true
+      shift
+      ;;
     *)
       echo "Unknown option or argument: $1" >&2
       usage
@@ -83,6 +88,12 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_DIR="$HOME/backups"
 BACKUP_FILE="$BACKUP_DIR/expenses_${TIMESTAMP}.db"
 
+if [ "$SKIP_TESTS" = true ]; then
+  TEST_STEP_MSG="[dry-run] skipping pytest (--skip-tests passed)"
+else
+  TEST_STEP_MSG="[dry-run] python -m pytest tests/ -q"
+fi
+
 if [ "$DRY_RUN" = true ]; then
   cat <<EOF
 [dry-run] set -euo pipefail
@@ -97,7 +108,7 @@ if [ "$DRY_RUN" = true ]; then
 [dry-run] pip install -r requirements.lock -q
 [dry-run] export EXPENSEFLOW_DATABASE_URI="\${EXPENSEFLOW_DATABASE_URI:-sqlite:///\$PWD/instance/expenses.db}"
 [dry-run] $ALEMBIC_CMD
-[dry-run] python -m pytest tests/ -q
+$TEST_STEP_MSG
 [dry-run] echo "Rollback command: git reset --hard <old_hash>"
 [dry-run] echo "NEXT: click Reload on the Web tab"
 EOF
@@ -137,7 +148,11 @@ if [ "$MODE" = "stamp" ]; then
 else
   alembic upgrade "$TARGET_REVISION"
 fi
-python -m pytest tests/ -q
+if [ "$SKIP_TESTS" = true ]; then
+  echo "Skipping pytest suite (--skip-tests passed; ensure CI checks already passed)."
+else
+  python -m pytest tests/ -q
+fi
 
 echo "Deploy succeeded."
 echo "Rollback command (if needed): git reset --hard $OLD_HASH"
