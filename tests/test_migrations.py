@@ -1278,18 +1278,6 @@ class TestStatementImportMigration:
             assert 'uq_expense_user_import_fingerprint' in {u['name'] for u in insp.get_unique_constraints('expense')}
             assert 'uq_category_rule_user_pattern' in {u['name'] for u in insp.get_unique_constraints('category_rule')}
 
-            with engine.connect() as conn:
-                ctx = MigrationContext.configure(
-                    conn, opts={'compare_type': True, 'compare_server_default': True}
-                )
-                diffs = compare_metadata(ctx, db.metadata)
-                if not is_postgres:
-                    diffs = [
-                        d for d in diffs
-                        if not (isinstance(d, tuple) and d[0] == 'add_index' and d[1].name in {'ix_user_username_lower', 'ix_user_email_lower'})
-                    ]
-                assert diffs == []
-
             # Duplicate non-NULL import_fingerprint for same user is rejected at DB level
             fp = 'a' * 64
             with engine.begin() as conn:
@@ -1320,7 +1308,18 @@ class TestStatementImportMigration:
             with engine.connect() as conn:
                 assert conn.execute(sa.text('SELECT COUNT(*) FROM expense')).scalar_one() == 4
 
-            command.upgrade(cfg, '0007_statement_import')
+            command.upgrade(cfg, 'head')
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                diffs = compare_metadata(ctx, db.metadata)
+                if not is_postgres:
+                    diffs = [
+                        d for d in diffs
+                        if not (isinstance(d, tuple) and d[0] == 'add_index' and d[1].name in {'ix_user_username_lower', 'ix_user_email_lower'})
+                    ]
+                assert diffs == []
         finally:
             if is_postgres:
                 with engine.begin() as conn:
@@ -1362,3 +1361,90 @@ class TestStatementImportMigration:
             assert ImportBatch.query.filter_by(user_id=user.id).count() == 0
             assert ImportRow.query.filter_by(user_id=user.id).count() == 0
             assert CategoryRule.query.filter_by(user_id=user.id).count() == 0
+
+
+class TestMultiformatBalanceMigration:
+    """Tests for 0008_multiformat_balance upgrade, CHECK constraints, downgrade, and metadata parity."""
+
+    def test_0008_upgrade_and_downgrade_across_sqlite_and_postgres(self, tmp_path):
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+
+        uri, is_postgres = _get_test_uri(tmp_path, 'm8_balance.db')
+        cfg = _alembic_config(uri)
+        engine = sa.create_engine(uri)
+        try:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+
+            command.upgrade(cfg, '0007_statement_import')
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    """INSERT INTO "user" (id, username, email, password_hash, registration_date, avatar)
+                       VALUES (1, 'baluser', 'bal@example.com', 'h1', CURRENT_TIMESTAMP, 'avatar_1')"""
+                ))
+                conn.execute(sa.text(
+                    """INSERT INTO import_batch (
+                           id, user_id, bank_profile, original_filename, file_sha256, detected_encoding,
+                           status, total_rows, ready_count, duplicate_manual_count, already_imported_count,
+                           skipped_credit_count, invalid_count, imported_count, skipped_count, created_at
+                       ) VALUES (
+                           1, 1, 'signed_iso', 'prior.csv', '0000000000000000000000000000000000000000000000000000000000000000',
+                           'utf-8', 'staged', 1, 1, 0, 0, 0, 0, 0, 0, CURRENT_TIMESTAMP
+                       )"""
+                ))
+                conn.execute(sa.text(
+                    """INSERT INTO import_row (
+                           id, batch_id, user_id, line_number, row_status, raw_narration, description,
+                           ref_no, category, payment_method, raw_preview, include_on_confirm
+                       ) VALUES (
+                           1, 1, 1, 2, 'ready', 'Sample', 'Sample', '', 'Uncategorised', 'UPI', 'Sample', :inc
+                       )"""
+                ), {'inc': True if is_postgres else 1})
+
+            command.upgrade(cfg, '0008_multiformat_balance')
+            insp = sa.inspect(engine)
+            batch_cols = {c['name'] for c in insp.get_columns('import_batch')}
+            row_cols = {c['name'] for c in insp.get_columns('import_row')}
+            assert {'detected_format_label', 'balance_check_status', 'balance_mismatch_count'}.issubset(batch_cols)
+            assert {'running_balance_paise', 'balance_mismatch_note'}.issubset(row_cols)
+
+            with engine.connect() as conn:
+                status, m_count = conn.execute(
+                    sa.text('SELECT balance_check_status, balance_mismatch_count FROM import_batch WHERE id = 1')
+                ).one()
+                assert status == 'unavailable'
+                assert m_count == 0
+
+                ctx = MigrationContext.configure(
+                    conn, opts={'compare_type': True, 'compare_server_default': True}
+                )
+                diffs = compare_metadata(ctx, db.metadata)
+                if not is_postgres:
+                    diffs = [
+                        d for d in diffs
+                        if not (isinstance(d, tuple) and d[0] == 'add_index' and d[1].name in {'ix_user_username_lower', 'ix_user_email_lower'})
+                    ]
+                assert diffs == []
+
+            with pytest.raises(sa.exc.IntegrityError):
+                with engine.begin() as conn:
+                    conn.execute(sa.text(
+                        """UPDATE import_batch SET balance_check_status = 'bogus' WHERE id = 1"""
+                    ))
+
+            command.downgrade(cfg, '0007_statement_import')
+            insp_down = sa.inspect(engine)
+            assert 'balance_check_status' not in {c['name'] for c in insp_down.get_columns('import_batch')}
+            assert 'running_balance_paise' not in {c['name'] for c in insp_down.get_columns('import_row')}
+            with engine.connect() as conn:
+                assert conn.execute(sa.text('SELECT COUNT(*) FROM import_batch')).scalar_one() == 1
+                assert conn.execute(sa.text('SELECT COUNT(*) FROM import_row')).scalar_one() == 1
+
+            command.upgrade(cfg, 'head')
+        finally:
+            if is_postgres:
+                with engine.begin() as conn:
+                    conn.execute(sa.text('DROP SCHEMA public CASCADE; CREATE SCHEMA public;'))
+            engine.dispose()

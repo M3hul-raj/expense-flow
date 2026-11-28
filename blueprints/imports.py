@@ -23,6 +23,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from extensions import limiter
 from models import CategoryRule, Expense, ImportBatch, ImportRow, db
 from statement_import import (
+    ALLOWED_IMPORT_EXTENSIONS,
     BANK_FORMATS,
     MANUAL_DUP_DATE_TOLERANCE_DAYS,
     MAX_IMPORT_FILE_BYTES,
@@ -33,7 +34,7 @@ from statement_import import (
     categorise_narration,
     clean_untrusted_text,
     match_manual_duplicate,
-    parse_statement_csv,
+    parse_statement_file,
     sanitize_filename,
     suggest_rule_pattern,
 )
@@ -143,7 +144,9 @@ def _upload_rate_limit_exceeded(_limit):
 
 
 def _resolve_bank_config(form):
-    profile = form.get('bank_profile', 'indian_standard').strip()
+    profile = form.get('bank_profile', 'auto_detect').strip()
+    if profile == 'auto_detect':
+        return None
     if profile == 'custom':
         preamble_raw = form.get('custom_preamble_rows', '0').strip() or '0'
         try:
@@ -176,7 +179,7 @@ def _resolve_bank_config(form):
     on_breach=_upload_rate_limit_exceeded,
 )
 def index():
-    """Upload bank statement CSV (parsed strictly in memory into staging) & view history/rules."""
+    """Upload bank statement (.csv, .xlsx, .xls, digital .pdf) strictly in memory & stage."""
     if not is_logged_in():
         flash('Please log in to import bank statements.', 'error')
         return redirect(url_for('auth.login'))
@@ -192,17 +195,26 @@ def index():
 
         uploaded = request.files.get('statement_file')
         if not uploaded or not uploaded.filename:
-            flash('Please choose a CSV file to upload.', 'error')
+            flash('Please choose a statement file to upload.', 'error')
             return redirect(url_for('imports.index'))
 
         clean_name = sanitize_filename(uploaded.filename)
-        if not clean_name.lower().endswith('.csv'):
-            flash('Please upload a .csv statement file.', 'error')
+        ext = ('.' + clean_name.rsplit('.', 1)[-1].lower()) if '.' in clean_name else ''
+        if ext not in ALLOWED_IMPORT_EXTENSIONS:
+            flash('Please upload a .csv, .xlsx, .xls, or digital .pdf statement file.', 'error')
             return redirect(url_for('imports.index'))
 
         raw_bytes = uploaded.stream.read(MAX_IMPORT_FILE_BYTES + 1)
+        # Transient file password stays in request stack memory only (never stored or logged)
+        raw_pw = request.form.get('statement_password', '')
+        file_password = raw_pw[:256] if raw_pw else None
         try:
-            parsed = parse_statement_csv(raw_bytes, config)
+            parsed = parse_statement_file(
+                raw_bytes,
+                filename=clean_name,
+                config=config,
+                file_password=file_password,
+            )
         except StatementParseError as exc:
             flash(str(exc), 'error')
             return redirect(url_for('imports.index'))
@@ -239,11 +251,14 @@ def index():
         batch = ImportBatch(
             user_id=user_id,
             bank_profile=parsed.bank_profile,
+            detected_format_label=parsed.detected_format_label,
             original_filename=clean_name,
             file_sha256=parsed.file_sha256,
             detected_encoding=parsed.detected_encoding,
             status='staged',
             total_rows=len(parsed.rows),
+            balance_check_status=parsed.balance_check_status,
+            balance_mismatch_count=parsed.balance_mismatch_count,
         )
         db.session.add(batch)
         db.session.flush()
@@ -287,6 +302,8 @@ def index():
                 row_status=row_status,
                 txn_date=row.txn_date,
                 amount_paise=row.amount_paise,
+                running_balance_paise=row.running_balance_paise,
+                balance_mismatch_note=row.balance_mismatch_note,
                 raw_narration=row.raw_narration,
                 description=row.description,
                 ref_no=row.ref_no,
@@ -362,7 +379,7 @@ def review_batch(batch_id):
     credit_total_paise = sum(row.amount_paise or 0 for row in skipped_credit_rows)
 
     profile_cfg = BANK_FORMATS.get(batch.bank_profile)
-    profile_label = profile_cfg.label if profile_cfg else 'Custom CSV Mapping'
+    profile_label = batch.detected_format_label or (profile_cfg.label if profile_cfg else 'Custom Column Mapping')
 
     return render_template(
         'import_review.html',

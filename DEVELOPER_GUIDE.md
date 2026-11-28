@@ -10,7 +10,7 @@ If you are a developer looking to contribute or understand the codebase, this do
 
 ExpenseFlow is a production-grade, full-stack web application built on a modern Python backend (Flask) with a custom, highly interactive vanilla JavaScript/CSS frontend. It uses the **application factory pattern** (`create_app()`) with **Flask Blueprints** and strictly implements the **MVC (Model-View-Controller)** pattern through server-side rendering (SSR):
 
-*   **Model (`models.py` + `alembic/`)**: Defines the relational schema (`User`, `Expense`, `Budget`, `ImportBatch`, `ImportRow`, `CategoryRule`) using SQLAlchemy ORM and versioned Alembic migrations (`0001_baseline` through `0007_statement_import`) across SQLite and PostgreSQL 16.
+*   **Model (`models.py` + `alembic/`)**: Defines the relational schema (`User`, `Expense`, `Budget`, `ImportBatch`, `ImportRow`, `CategoryRule`) using SQLAlchemy ORM and versioned Alembic migrations (`0001_baseline` through `0008_multiformat_balance`) across SQLite and PostgreSQL 16.
 *   **View (`templates/`, `static/`)**: Jinja2 HTML templates styled with a completely custom CSS design system (`main.css`), featuring dynamic JavaScript interactivity without heavy frontend frameworks.
 *   **Controller (`app.py` + `blueprints/` + `statement_import.py`)**: The application factory in `app.py` wires extensions, per-connection SQLite `PRAGMA foreign_keys=ON`, and registers 6 blueprints (`auth`, `expenses`, `budget`, `analytics`, `imports`, `main`) that contain all route logic. Bank statement parsing, mapping configs, deduplication, and deterministic categorisation live in `statement_import.py`; shared utilities (including `Decimal`/paise helpers, CSV formula neutralization, and `commit_session()` rollback hygiene) live in `utils.py`; and extension instances (CSRF, rate limiter) are defined in `extensions.py` to avoid circular imports.
 
@@ -24,14 +24,14 @@ expense-flow/
 │   └── ci.yml                  # GitHub Actions CI: Python 3.10–3.13 (SQLite) + PostgreSQL 16
 ├── alembic/
 │   ├── env.py                  # Alembic environment (batch rebuilds on SQLite)
-│   └── versions/               # Revisions 0001_baseline .. 0007_statement_import
+│   └── versions/               # Revisions 0001_baseline .. 0008_multiformat_balance
 ├── alembic.ini                 # Alembic config
 ├── app.py                      # Application factory (create_app): config, FK hook, blueprints
 ├── compose.yaml                # Two-container dev stack (Gunicorn web + PostgreSQL 16)
 ├── Dockerfile                  # Production-like container build
 ├── extensions.py               # Bare Flask extension instances (CSRFProtect, Limiter)
 ├── models.py                   # SQLAlchemy models + NAMING_CONVENTION (User, Expense, Budget, Import*)
-├── statement_import.py         # Bank CSV mapping configs, in-memory parser, dedupe & rule engine
+├── statement_import.py         # Multi-format parser (CSV/XLSX/XLS/PDF), auto-detect, balance check, dedupe & rules
 ├── utils.py                    # Shared helpers, Decimal/paise conversions, CSV safety, commit_session
 ├── requirements*.in / *.lock   # Universal uv lockfiles (base + postgres)
 ├── DEVELOPER_GUIDE.md          # This documentation file
@@ -54,10 +54,10 @@ expense-flow/
 ├── tests/
 │   ├── conftest.py             # Shared pytest fixtures (SQLite or EXPENSEFLOW_TEST_DATABASE_URI)
 │   ├── test_app.py             # 27 functional tests: CRUD, budget logic, Decimal, CSRF
-│   ├── test_migrations.py      # 38 Alembic migration, compatibility & EXPLAIN plan tests
+│   ├── test_migrations.py      # 39 Alembic migration, compatibility & EXPLAIN plan tests
 │   ├── test_migration_verification.py # 4 audit & paise-conservation tests
 │   ├── test_regressions.py     # 103 regression tests: config, security, constraints, case auth, SW, UI, BFCache
-│   └── test_statement_import.py # 23 statement import, SBI YONO, dedupe, rules, atomicity, security & smoke tests
+│   └── test_statement_import.py # 27 multi-format import, encryption, balance check, dedupe, rules & smoke tests
 ├── static/
 │   ├── main.css                # The core CSS Design System (CSS Variables, Dark/Light modes).
 │   ├── avatars.css             # Avatar styling for profile selection.
@@ -152,12 +152,12 @@ All POST forms include a hidden `csrf_token()` field validated by **Flask-WTF's 
 *   **Testing:** CSRF and rate limiting are disabled in `testing` mode (`WTF_CSRF_ENABLED=False`, `RATELIMIT_ENABLED=False`), with dedicated tests re-enabling both to prove `400` and `429` enforcement.
 
 ### H. Automated Testing & CI
-The `tests/` directory contains **195 pytest tests** across `test_app.py`, `test_regressions.py`, `test_migrations.py`, `test_migration_verification.py`, and `test_statement_import.py` covering:
+The `tests/` directory contains **200 pytest tests** across `test_app.py`, `test_regressions.py`, `test_migrations.py`, `test_migration_verification.py`, and `test_statement_import.py` covering:
 *   **Expense CRUD & Precision** — add, edit, delete with `Decimal` (`ROUND_HALF_UP`) paise parsing, server-side validation, and integer paise arithmetic
-*   **Bank CSV Statement Import** — mapping configs (`split_columns` & `signed_amount` & custom mapping), synthetic Indian bank fixture, encoding/size/row caps, explicit invalid-row reporting, skipped credits, occurrence-aware idempotent deduplication, 1-to-1 manual duplicate flags, deterministic `"Always apply"` keyword rules, and single-transaction Confirm & Undo atomicity
+*   **Multi-Format Bank Statement Import** — in-memory parsing of `.csv`, `.xlsx`, `.xls`, and digital `.pdf` (including password decryption in server RAM via `msoffcrypto-tool` & `pdfplumber`), `Auto-Detect` header synonyms & bank presets (`SBI / YONO SBI`, `Union Bank / Union Ease`, `Indian Bank Standard`, `Signed Amount`, `Custom`), `(Dr)`/`(Cr)` amounts, running-balance reconciliation, encoding/size/row/page caps, explicit invalid-row reporting, skipped credits, occurrence-aware idempotent deduplication, 1-to-1 manual duplicate flags, deterministic `"Always apply"` keyword rules, and single-transaction Confirm & Undo atomicity
 *   **Cross-user isolation** — one user cannot edit/delete another user's expenses or access/confirm/undo/delete another user's import batches or rules (returns 404)
 *   **Budget logic** — default budget, explicit budget row, recurring fallback, override priority, and strict ASCII input validation
-*   **Database Integrity & Migrations** — `0001_baseline` → `0007_statement_import` upgrade/downgrade parity, legacy Stage-1A `sqlite_autoindex_*` compatibility, `EXPLAIN` plan checks, paise-conservation audits (`verify_migration.py`), `CHECK`/`NOT NULL`/`ON DELETE CASCADE`, SQLite `PRAGMA foreign_keys=ON`, `commit_session()` rollback hygiene, and case-insensitive auth
+*   **Database Integrity & Migrations** — `0001_baseline` → `0008_multiformat_balance` upgrade/downgrade parity, legacy Stage-1A `sqlite_autoindex_*` compatibility, `EXPLAIN` plan checks, paise-conservation audits (`verify_migration.py`), `CHECK`/`NOT NULL`/`ON DELETE CASCADE`, SQLite `PRAGMA foreign_keys=ON`, `commit_session()` rollback hygiene, and case-insensitive auth
 *   **Security & regressions** — fail-fast production `EXPENSEFLOW_SECRET_KEY` (32+ chars), HTTPS `Set-Cookie` flags (`HttpOnly`, `Secure`, `SameSite=Lax`), generic login errors, PII-free auth/import logs, `/edit_profile` password gate for email changes, ReportLab XML escaping, CWE-1236 CSV formula neutralization, dashboard recent-transactions ordering, and `sw.js` fetch resilience
 *   **CSRF & Rate Limiting** — POST without token returns `400`; upload limit breach returns `429`
 
@@ -211,8 +211,8 @@ Tests run against an isolated **in-memory SQLite database** (`sqlite:///:memory:
 2. **Run the deploy script** in the PythonAnywhere Bash console with an explicit revision (preview first with `--dry-run`):
    ```bash
    cd ~/ExpenseFlow
-   bash deploy/pa_deploy.sh --upgrade-to 0007_statement_import --dry-run
-   bash deploy/pa_deploy.sh --upgrade-to 0007_statement_import
+   bash deploy/pa_deploy.sh --upgrade-to 0008_multiformat_balance --dry-run
+   bash deploy/pa_deploy.sh --upgrade-to 0008_multiformat_balance
    ```
    *(Use `--stamp 0001_baseline` only for initial baseline tracking on an un-versioned DB.)* The script enforces branch `main`, backs up `instance/expenses.db` into `~/backups/` via `sqlite3 .backup`, verifies `PRAGMA integrity_check` and row counts, runs `git pull --ff-only origin main`, installs `requirements.lock`, executes the requested Alembic command, runs `pytest`, and prints the rollback command (`git reset --hard <old_hash>`). It never touches the WSGI file.
 3. **Reload**: Click **Reload** on the PythonAnywhere **Web** tab.
@@ -232,7 +232,7 @@ For technical recruiters reviewing this repository, here is a summary of the eng
 *   **Bank Statement Import Pipeline:** Designed a declarative CSV mapping layer (`statement_import.py`) with in-memory parsing (`2 MB` / `2,000` row caps), occurrence-aware SHA-256 idempotent deduplication, 1-to-1 manual duplicate flagging, deterministic `"Always apply"` categorisation rules, and single-transaction Confirm/Undo atomicity.
 *   **Security Hardening:** Implemented CSRF token validation on all POST forms via Flask-WTF, rate limiting via Flask-Limiter (`5 / 15 min` on `/login` and `10 / 15 min` on `/imports` with custom 429 response rendering), fail-fast `EXPENSEFLOW_SECRET_KEY` checks, `HttpOnly`/`Secure`/`SameSite=Lax` cookies, CWE-1236 CSV formula neutralization, and PII-free logging.
 *   **Advanced Data Processing:** Developed complex data aggregation algorithms to feed a real-time 9-section analytics engine, calculating dynamic budget thresholds, MoM variances, and heatmap intensities.
-*   **Testing & CI/CD:** Built a 192-test pytest suite with isolated SQLite & PostgreSQL 16 fixtures, migration verification tooling, and a stdlib end-to-end smoke test (including `import -> confirm -> undo`), integrated into a GitHub Actions CI pipeline across Python 3.10–3.13 and PostgreSQL 16.
+*   **Testing & CI/CD:** Built a 200-test pytest suite with isolated SQLite & PostgreSQL 16 fixtures, migration verification tooling, and a stdlib end-to-end smoke test (including `import -> confirm -> undo`), integrated into a GitHub Actions CI pipeline across Python 3.10–3.13 and PostgreSQL 16.
 *   **UI/UX Engineering:** Designed a premium, glassmorphic UI with a scalable CSS variable architecture, implementing flawless, OS-aware Dark and Light modes.
 *   **Web APIs & PWA:** Programmed a custom Service Worker with network-only HTML navigations (zero private page caching) and cache-first static asset caching for offline resilience and mobile installation.
 *   **Document Generation:** Built a custom pipeline using ReportLab to dynamically render and serve formatted, paginated PDF financial reports from memory.

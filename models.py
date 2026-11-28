@@ -81,12 +81,13 @@ class Budget(db.Model):
 
 
 class ImportBatch(db.Model):
-    """Tracks a CSV statement upload batch through staged review, confirm, and undo."""
+    """Tracks a statement upload batch through staged review, confirm, and undo."""
     __tablename__ = 'import_batch'
 
     id                     = db.Column(db.Integer, primary_key=True)
     user_id                = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False, index=True)
     bank_profile           = db.Column(db.String(64), nullable=False)
+    detected_format_label  = db.Column(db.String(80), nullable=True)
     original_filename      = db.Column(db.String(255), nullable=False)
     file_sha256            = db.Column(db.String(64), nullable=False)
     detected_encoding      = db.Column(db.String(32), nullable=False)
@@ -99,6 +100,18 @@ class ImportBatch(db.Model):
     invalid_count          = db.Column(db.Integer, nullable=False, default=0)
     imported_count         = db.Column(db.Integer, nullable=False, default=0)
     skipped_count          = db.Column(db.Integer, nullable=False, default=0)
+    balance_check_status   = db.Column(
+        db.String(20),
+        nullable=False,
+        default='unavailable',
+        server_default=db.text("'unavailable'"),
+    )
+    balance_mismatch_count = db.Column(
+        db.Integer,
+        nullable=False,
+        default=0,
+        server_default=db.text('0'),
+    )
     created_at             = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     confirmed_at           = db.Column(db.DateTime, nullable=True)
     undone_at              = db.Column(db.DateTime, nullable=True)
@@ -108,6 +121,10 @@ class ImportBatch(db.Model):
 
     __table_args__ = (
         db.CheckConstraint("status IN ('staged', 'confirmed', 'undone')", name='status_valid'),
+        db.CheckConstraint(
+            "balance_check_status IN ('verified', 'mismatch', 'unavailable')",
+            name='balance_check_status_valid',
+        ),
         db.Index('idx_import_batch_user_created', 'user_id', 'created_at', 'id'),
     )
 
@@ -116,14 +133,16 @@ class ImportRow(db.Model):
     """Stores parsed statement rows (debits, skipped credits, invalid rows) in staging."""
     __tablename__ = 'import_row'
 
-    id                 = db.Column(db.Integer, primary_key=True)
-    batch_id           = db.Column(db.Integer, db.ForeignKey('import_batch.id', ondelete='CASCADE'), nullable=False, index=True)
-    user_id            = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False, index=True)
-    line_number        = db.Column(db.Integer, nullable=False)
-    row_status         = db.Column(db.String(32), nullable=False)
-    txn_date           = db.Column(db.Date, nullable=True)
-    amount_paise       = db.Column(db.BigInteger, nullable=True)
-    raw_narration      = db.Column(db.String(500), nullable=False, default='')
+    id                    = db.Column(db.Integer, primary_key=True)
+    batch_id              = db.Column(db.Integer, db.ForeignKey('import_batch.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id               = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False, index=True)
+    line_number           = db.Column(db.Integer, nullable=False)
+    row_status            = db.Column(db.String(32), nullable=False)
+    txn_date              = db.Column(db.Date, nullable=True)
+    amount_paise          = db.Column(db.BigInteger, nullable=True)
+    running_balance_paise = db.Column(db.BigInteger, nullable=True)
+    balance_mismatch_note = db.Column(db.String(255), nullable=True)
+    raw_narration         = db.Column(db.String(500), nullable=False, default='')
     description        = db.Column(db.String(255), nullable=False, default='')
     ref_no             = db.Column(db.String(100), nullable=False, default='')
     category           = db.Column(db.String(50), nullable=False, default='Uncategorised')

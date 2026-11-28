@@ -369,6 +369,267 @@ class TestMappingParserAndEncodings:
             'WDL TFR UPI/DR/900000000010/METRO TRANSIT/UBIN/metro@ubin 0000124 AT 00000 BRANCH'
         ) == 'METRO'
 
+    def test_dr_cr_suffix_and_pos_colon_inference_and_union_bank_stopwords(self):
+        assert parse_statement_amount_to_paise('55.00(Dr)', allow_signed=False, column_role='debit') == (5_500, None)
+        assert parse_statement_amount_to_paise('30.00(Cr)', allow_signed=False, column_role='credit') == (3_000, None)
+        assert parse_statement_amount_to_paise('1,250.50 (Dr)', allow_signed=True, column_role='signed') == (-125_050, None)
+
+        bad_val, bad_err = parse_statement_amount_to_paise('30.00(Cr)', allow_signed=False, column_role='debit')
+        assert bad_val is None and 'Credit indicator' in bad_err
+
+        assert suggest_rule_pattern('UPIAR/900000000001/DR/FAKE MART/YESB/fake@ybl') == 'FAKE'
+        assert suggest_rule_pattern('UPIAB/900000000002/CR/SAMPLE REFUND/UTIB/ref@axis') == 'SAMPLE'
+
+        from statement_import import infer_payment_method
+        assert infer_payment_method('POS:SYNTHETIC CLOUD SERVICE/0000123') == 'Debit Card'
+
+    def test_union_bank_synthetic_encrypted_pdf_autodetects_and_verifies_balance(
+        self, auth_client, user, caplog
+    ):
+        import logging
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.pdfencrypt import StandardEncryption
+        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        styles = getSampleStyleSheet()
+        pdf_buf = io.BytesIO()
+        pw = 'UnionSecret!99'
+        doc = SimpleDocTemplate(
+            pdf_buf,
+            pagesize=letter,
+            encrypt=StandardEncryption(pw, 'OwnerSecret!99'),
+        )
+
+        # Page 1: Metadata table + Page 1 bordered statement table
+        meta_tbl = Table([['Your Details', 'Account Details'], ['Synthetic User', 'INR']])
+        meta_tbl.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 0.25, colors.grey)]))
+
+        p1_rows = [
+            ['Date', 'Transaction\nId', 'Remarks', 'Debit\nAmount(INR)', 'Credit\nAmount(INR)', 'Balance(INR)'],
+            ['01-11-2026', 'T1001', 'UPIAR/900000000001/DR/FAKE MART\n/YESB/fake@ybl', '55.00(Dr)', '', '495.04(Cr)'],
+            ['01-11-2026', 'T1002', 'UPIAB/900000000002/CR/SYNTHETIC DEP\n/CBIN/demo@okaxis', '', '30.00(Cr)', '525.04(Cr)'],
+            ['02-11-2026', 'T1003', 'POS:SYNTHETIC CLOUD/0000123456', '19.82(Dr)', '', '505.22(Cr)'],
+        ]
+        t1 = Table(p1_rows)
+        t1.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 0.5, colors.black)]))
+
+        # Page 2: Repeated header + continuing rows maintaining exact running balance
+        p2_rows = [
+            ['Date', 'Transaction\nId', 'Remarks', 'Debit\nAmount(INR)', 'Credit\nAmount(INR)', 'Balance(INR)'],
+            ['04-11-2026', 'T1004', 'UPIAR/900000000003/DR/DEMO CAFE\n/YESB/cafe@ybl', '230.00(Dr)', '', '275.22(Cr)'],
+        ]
+        t2 = Table(p2_rows)
+        t2.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 0.5, colors.black)]))
+
+        # Page 3: Promo banner page with zero transaction tables
+        promo = Paragraph('Thank you for banking with us.', styles['Normal'])
+
+        doc.build([meta_tbl, Spacer(1, 12), t1, PageBreak(), t2, PageBreak(), promo])
+        pdf_bytes = pdf_buf.getvalue()
+
+        # 1. Missing password is rejected cleanly
+        resp_missing_pw = _upload_csv(
+            auth_client,
+            pdf_bytes,
+            filename='synthetic_union.pdf',
+            bank_profile='auto_detect',
+        )
+        assert resp_missing_pw.status_code == 302
+        assert b'password-protected' in auth_client.get('/imports').data
+        assert ImportBatch.query.count() == 0
+
+        # 2. Wrong password is rejected cleanly
+        resp_bad_pw = _upload_csv(
+            auth_client,
+            pdf_bytes,
+            filename='synthetic_union.pdf',
+            bank_profile='auto_detect',
+            extra={'statement_password': 'wrong-password'},
+        )
+        assert resp_bad_pw.status_code == 302
+        assert b'Incorrect password' in auth_client.get('/imports').data
+        assert ImportBatch.query.count() == 0
+
+        # 3. Valid password unlocks strictly in memory, verifies running balances, and never logs password
+        with caplog.at_level(logging.INFO, logger='expenseflow'):
+            resp_ok = _upload_csv(
+                auth_client,
+                pdf_bytes,
+                filename='synthetic_union.pdf',
+                bank_profile='auto_detect',
+                extra={'statement_password': pw},
+            )
+        assert resp_ok.status_code == 302
+        batch_id = _extract_batch_id(resp_ok)
+
+        batch = db.session.get(ImportBatch, batch_id)
+        assert batch.bank_profile == 'auto_detect'
+        assert batch.detected_encoding == 'pdf-encrypted'
+        assert 'PDF' in (batch.detected_format_label or '')
+        assert batch.balance_check_status == 'verified'
+        assert batch.balance_mismatch_count == 0
+        assert batch.ready_count == 3
+        assert batch.skipped_credit_count == 1
+        assert batch.invalid_count == 0
+
+        review_html = auth_client.get(f'/imports/{batch_id}').data.decode('utf-8')
+        assert 'balanceVerifiedBadge' in review_html
+        assert pw not in review_html
+        assert pw not in caplog.text
+
+        # Payment methods accurately inferred from PDF remarks
+        methods = [
+            r.payment_method
+            for r in ImportRow.query.filter_by(batch_id=batch_id, row_status='ready').order_by(ImportRow.line_number.asc())
+        ]
+        assert methods == ['UPI', 'Debit Card', 'UPI']
+
+        # Confirm writes the 3 debits atomically in paise
+        auth_client.post(f'/imports/{batch_id}/confirm', follow_redirects=True)
+        expenses = Expense.query.filter_by(user_id=user.id).order_by(Expense.id.asc()).all()
+        assert [e.amount_paise for e in expenses] == [5_500, 1_982, 23_000]
+
+    def test_encrypted_xlsx_empty_sheet_skip_native_dates_and_mock_xls(self, auth_client, user, caplog, monkeypatch):
+        import logging
+        import msoffcrypto
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        empty_ws = wb.active
+        empty_ws.title = 'SummaryCover'
+        empty_ws.append(['Empty Cover Sheet'])
+
+        stmt_ws = wb.create_sheet('Statement')
+        stmt_ws.append(['Account Metadata', 'INR'])
+        stmt_ws.append(['Date', 'Details', 'Ref No/Cheque No', 'Debit', 'Credit', 'Balance'])
+        stmt_ws.append([py_date(2026, 5, 1), 'DEP TFR SALARY SYNTHETIC', 'R1', None, 5000.0, 5000.0])
+        stmt_ws.append([py_date(2026, 5, 3), 'WDL TFR UPI/DR/900001/FAKE MART/YESB/fake@ybl', 'R2', 186.8, None, 4813.2])
+        stmt_ws.append([py_date(2026, 5, 5), 'WDL TFR UPI/DR/900002/SAMPLE CAFE/UTIB/demo@okaxis', 'R3', 1250.5, None, 3562.7])
+
+        plain_buf = io.BytesIO()
+        wb.save(plain_buf)
+        plain_buf.seek(0)
+
+        enc_buf = io.BytesIO()
+        xlsx_pw = 'ExcelLock#42'
+        msoffcrypto.OfficeFile(plain_buf).encrypt(xlsx_pw, enc_buf)
+        enc_bytes = enc_buf.getvalue()
+
+        with caplog.at_level(logging.INFO, logger='expenseflow'):
+            resp = _upload_csv(
+                auth_client,
+                enc_bytes,
+                filename='yono_synthetic.xlsx',
+                bank_profile='auto_detect',
+                extra={'statement_password': xlsx_pw},
+            )
+        assert resp.status_code == 302
+        batch_id = _extract_batch_id(resp)
+        batch = db.session.get(ImportBatch, batch_id)
+        assert batch.detected_encoding == 'xlsx-encrypted'
+        assert batch.balance_check_status == 'verified'
+        assert batch.ready_count == 2
+        assert batch.skipped_credit_count == 1
+        assert xlsx_pw not in caplog.text
+
+        # Verify legacy .xls extractor handling via synthetic in-memory xlrd workbook
+        import xlrd
+
+        class _FakeCell:
+            def __init__(self, ctype, value):
+                self.ctype = ctype
+                self.value = value
+
+        class _FakeSheet:
+            def __init__(self, grid):
+                self._grid = grid
+                self.nrows = len(grid)
+                self.ncols = max(len(r) for r in grid)
+
+            def cell(self, r, c):
+                return self._grid[r][c]
+
+        class _FakeBook:
+            datemode = 0
+
+            def sheets(self):
+                return [_FakeSheet([
+                    [_FakeCell(xlrd.XL_CELL_TEXT, h) for h in ('Txn Date', 'Narration', 'Amount', 'Dr/Cr', 'Balance')],
+                    [_FakeCell(xlrd.XL_CELL_TEXT, '01-10-2026'), _FakeCell(xlrd.XL_CELL_TEXT, 'UPI/FAKE SHOP'),
+                     _FakeCell(xlrd.XL_CELL_NUMBER, 250.5), _FakeCell(xlrd.XL_CELL_TEXT, 'DR'), _FakeCell(xlrd.XL_CELL_NUMBER, 749.5)],
+                ])]
+
+        monkeypatch.setattr(xlrd, 'open_workbook', lambda file_contents: _FakeBook())
+        from statement_import import parse_statement_file
+        parsed_xls = parse_statement_file(b'FAKE_XLS_STREAM', filename='legacy.xls', config=None, today=py_date(2026, 11, 28))
+        assert parsed_xls.detected_encoding == 'xls'
+        assert parsed_xls.rows[0].amount_paise == 25_050
+        assert parsed_xls.rows[0].row_status == 'ready'
+
+    def test_borderless_pdf_continuation_scanned_pdf_rejection_and_balance_mismatch(
+        self, auth_client
+    ):
+        from reportlab.pdfgen import canvas as rl_canvas
+        from reportlab.platypus import SimpleDocTemplate, Table
+
+        # 1. Borderless digital PDF with Amount + Dr/Cr column and continuation narration line
+        buf_borderless = io.BytesIO()
+        SimpleDocTemplate(buf_borderless).build([Table([
+            ['Date', 'Narration', 'Amount', 'Dr/Cr', 'Balance'],
+            ['01-11-2026', 'WDL TFR UPI/DR/101/FAKE MART', '120.00', 'DR', '880.00'],
+            ['', '/YESB/fakemart@ybl', '', '', ''],
+            ['02-11-2026', 'DEP TFR SALARY WIRE', '500.00', 'CR', '1380.00'],
+        ], colWidths=[75, 190, 65, 50, 75])])
+
+        from statement_import import parse_statement_file
+        parsed_bl = parse_statement_file(
+            buf_borderless.getvalue(),
+            filename='borderless.pdf',
+            config=None,
+            today=py_date(2026, 11, 28),
+        )
+        assert parsed_bl.balance_check_status == 'verified'
+        assert len(parsed_bl.rows) == 2
+        assert parsed_bl.rows[0].amount_paise == 12_000
+        assert 'fakemart@ybl' in parsed_bl.rows[0].raw_narration
+        assert parsed_bl.rows[1].row_status == 'skipped_credit'
+
+        # 2. Scanned/image-only PDF (no selectable text) rejected cleanly
+        buf_scan = io.BytesIO()
+        c = rl_canvas.Canvas(buf_scan)
+        c.rect(50, 50, 200, 100)
+        c.showPage()
+        c.save()
+        with pytest.raises(StatementParseError, match='scanned/image-only'):
+            parse_statement_file(buf_scan.getvalue(), filename='scan.pdf')
+
+        # 3. Descending statement verifies without false mismatch; broken ascending flags exact row
+        desc_csv = (
+            'Date,Description,Amount,Balance\n'
+            '2026-10-03,Later Spend,-100.00,900.00\n'
+            '2026-10-01,Earlier Spend,-50.00,1000.00\n'
+        ).encode('utf-8')
+        parsed_desc = parse_statement_csv(desc_csv, BANK_FORMATS['signed_iso'], today=py_date(2026, 11, 28))
+        assert parsed_desc.balance_check_status == 'verified'
+        assert parsed_desc.balance_mismatch_count == 0
+
+        broken_csv = (
+            'Date,Description,Amount,Balance\n'
+            '2026-10-01,Txn 1,-100.00,900.00\n'
+            '2026-10-02,Txn 2 Corrupted Balance,-50.00,800.00\n'
+        ).encode('utf-8')
+        resp_brk = _upload_csv(auth_client, broken_csv, filename='broken_bal.csv', bank_profile='auto_detect')
+        brk_batch_id = _extract_batch_id(resp_brk)
+        brk_batch = db.session.get(ImportBatch, brk_batch_id)
+        assert brk_batch.balance_check_status == 'mismatch'
+        assert brk_batch.balance_mismatch_count == 1
+        review_brk = auth_client.get(f'/imports/{brk_batch_id}').data.decode('utf-8')
+        assert 'balanceMismatchAlert' in review_brk
+        assert '₹850.00' in review_brk
+        assert '₹800.00' in review_brk
+
 
 class TestDedupeAndRules:
     """Tests for idempotent dedupe, identical repeats, manual duplicate flags, and deterministic rules."""
